@@ -15,7 +15,8 @@ import random
 
 
 
-sys.path.append("/home/jonathan/repo/Veering/scripts")
+
+sys.path.append("/home/jonathan/Dropbox/repo/Veering/scripts")
 sys.set_int_max_str_digits(0)
 import boundary_triangulation
 import prepare
@@ -356,8 +357,8 @@ def analyze(bword, name="test"):
 #the next challengers
 #bun = analyze([1,1,1,3,3,3,2,2,2,1,1,3,3,3,2,2,2], name="challenge1")
 bun = analyze([1,2,3,3,3,2,2,1,1,1,2,3,3,2,1], name="challenge2")
-
-
+#braid index 4, 15 crossings, 4 - 15 + 1 = -10, xi = -10, 2g-1 = 11, slope = 1/20, 1/9
+#bun = analyze(9*[1,2,3,4]+4*[4,3,2], name="challenge3")
 
 #print(veering.transverse_taut.edge_side_face_collections(tri,angle))
 

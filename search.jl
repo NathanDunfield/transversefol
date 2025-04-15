@@ -2,20 +2,15 @@ const T=Float64
 using OffsetArrays
 import Base: inv, getindex, setindex!, hash, push!, length
 using DataStructures
-using Plots
 using Profile
 #using ProfileView
 using Base.Threads
-using PlotlyJS
 using Measurements
 using StaticArrays
+using LinearAlgebra
+#import Plots: plot
 
-#plotlyjs()
-
-import Plots: plot
-
-const CLIP = 10 #don't worry about any slopes of absolute value bigger than CLIP
-
+const CLIP = 25 #don't worry about any slopes of absolute value bigger than CLIP
 
 abstract type Homeo end
 
@@ -25,11 +20,87 @@ end
 
 const Track = Tuple{Int,Int} #edge index and vertex number
 #represents a piecewise linear function from [0,1] to [0,1]
+#
+const Slope = SVector{2,Int}
+const MultiSlope{N} = SVector{N,Slope} where N #todo: make all vector of slopes into multislopes
+
+#make this mutable, so that we can do simulated annealing by updating the same struct over and over again.
 struct Piecewise <: Homeo
 	left::Union{Piecewise, Linear}
 	right::Union{Piecewise, Linear}
 	x::T
 	fx::T #x maps to fx
+end #todo: Piecewise should just have a flag letting you lazily invert it.
+
+
+@enum Dir LEFT=1 RIGHT=2
+@enum RoundMode DOWN=1 UP=2
+struct DiscreteHomeo <: Homeo
+    left_heights::Vector{T} #sorted list of heights on the left, starting with 0 and ending at 1
+    right_heights::Vector{T} #sorted list of heights on the right
+    ordering::Vector{Dir} #ordering of the left_heights and right_heights, excluding 0s and 1s
+    dir::Dir
+end
+
+function inv(d::DiscreteHomeo) #uses the same underlying array
+    return DiscreteMap(d.right_heights, d.left_heights, d.ordering, inv(d.dir))
+end
+
+function inv(d::Dir)
+    if d == DOWN
+        return UP
+    else
+        return DOWN
+    end
+end
+
+function (f::DiscreteHomeo)(r::Rational{Int}, roundmode::RoundMode)
+    if r==f.left_heights[1]
+        return f.right_heights[1]
+    elseif r==f.left_heights[end]
+        return f.right_heights[end]
+    end
+
+    index_range = searchsorted(f.left_heights, r)
+    @assert length(index_range)==1
+    index = index_range[1]
+
+    if roundmode == DOWN
+        curr_leftindex = 1
+        curr_rightindex = 1
+
+        for k in 1:length(f.ordering)
+            if f.ordering[k] == f.dir
+                curr_leftindex += 1
+            else
+                curr_rightindex +=1
+            end
+            if curr_leftindex == index
+                return right_heights[curr_rightindex]
+            end
+        end
+    elseif f.roundmode == UP
+        curr_leftindex = length(f.left_heights)
+        curr_rightindex = length(f.right_heights)
+
+        for k in length(f.ordering):-1:1
+            if f.ordering[k] == f.dir
+                curr_leftindex -= 1
+            else
+                curr_rightindex -=1
+            end
+            if curr_leftindex == index
+                return f.right_heights[curr_rightindex]
+            end
+        end
+    end 
+end
+
+function random_discrete_homeo(j::Junction, thickness::Int)
+    left_heights = Rational{Int}[i//thickness for i in 0:j.left_len * thickness]
+    right_heights = Rational{Int}[i//thickness for i in 0:j.right_len * thickness]
+    ordering = shuffle(vcat(Dir[LEFT for i in 1:length(left_heights-2)], Dir[RIGHT for i in 1:length(right_heights-2)]))
+    return DiscreteHomeo(left_heights, right_heights, ordering, LEFT)
 end
 
 abstract type Comp
@@ -67,15 +138,15 @@ struct ArrayDict{S,T,N}
 end
 
 function getindex(A::ArrayDict{S,T,N}, i::S) where {S,T,N}
-	@assert isassigned(A.data, tupleIndex(i)...)
+	#@assert isassigned(A.data, tupleIndex(i)...)
 	return A.data[CartesianIndex{N}(tupleIndex(i))]
 end
 function getindex(A::ArrayDict{S,T,2}, i::S) where {S,T}
-	@assert isassigned(A.data, tupleIndex(i)...)
+	#@assert isassigned(A.data, tupleIndex(i)...)
 	return A.data[tupleIndex(i)[1], tupleIndex(i)[2]]
 end
 function getindex(A::ArrayDict{S,T,3}, i::S) where {S,T}
-	@assert isassigned(A.data, tupleIndex(i)...)
+	#@assert isassigned(A.data, tupleIndex(i)...)
 	return A.data[tupleIndex(i)[1], tupleIndex(i)[2],tupleIndex(i)[3]]
 end
 function setindex!(A::ArrayDict{S,T,N}, val::T, i::S) where {S,T,N}
@@ -102,9 +173,9 @@ struct BoundaryTriangulation
 	forwardfan::ArrayDict{Tuple{Int,Junction}, Track, 3}
 	backwardfan::ArrayDict{Tuple{Int,Junction}, Track, 3}
 	weights::ArrayDict{Track, SVector{2,T}, 2}
-	junctions::Vector{Junction}
+	junctions::Vector{Junction}#doesn't include mappings for inverses
 	firstrungs::Vector{Track}#one rung in each cusp
-	rungs::Vector{Vector{Track}}
+	rungs::Vector{Vector{Vector{Track}}} #for each cusp, and for each ladder, the list of its rungs
 	alledges::Vector{Vector{Track}}#edges appearing in each cusp
 	#fans is a list of pairs of fans
 	
@@ -145,7 +216,7 @@ struct BoundaryTriangulation
 			end
 		end
 		for l in rungs
-			for track in l
+			for track in l[1] #only assign weight 1 to the first ladder.
 				weights[track] = SVector{2,T}([1,0])
 			end
 		end
@@ -159,12 +230,21 @@ end
 
 struct Candidate
 	bt::BoundaryTriangulation
-	d::Dict{Junction, Union{Piecewise,Linear}}
+	d::Dict{Junction, Union{Piecewise,Linear}} #convert to an ArrayDict?
 end
+
+mutable struct Cand{S<:Homeo}
+    bt::BoundaryTriangulation
+    d::ArrayDict{Junction, S}
+end
+
+
 struct Envelope{S} #keep track of local maxes
 	A::Vector{Tuple{Vector{T},Candidate}}
 	L::SpinLock
 end
+
+includet("mutable_piecewise.jl")
 
 function prunings(p::Piecewise)
 	chnl = Channel{Homeo}(3)
@@ -274,7 +354,7 @@ function prunings(c::Candidate)
 			for p in prunings(D[J])
 				if complexity(p) < complexity(D[J])
 					cnew=Candidate(c.bt,Dict{Junction,Union{Piecewise,Linear}}())
-					for _J in bt.junctions
+					for _J in c.bt.junctions
 						cnew[_J]=c[_J]
 					end
 					cnew[J]=p
@@ -293,25 +373,24 @@ end
 
 function prune(c::Candidate)
 	val = approximant_all_slopes(c)
-	@show complexity(c)
+	old_complexity = complexity(c)
 
 	@label here
 	for cnew in prunings(c)
 		if approximant_all_slopes(cnew,time=10000) == val
-			#@show complexity(cnew)
 			c=cnew
 			@goto here
 		end
 	end
 
-	@show complexity(c)
-	println("--")
-
+	@show (old_complexity, complexity(c))
 	return c
 end
 
 function prune(E::Envelope{S}) where {S}
-	return Envelope{S}([(val, prune(c)) for (val,c) in E.A])
+    E2 = Envelope{S}(copy(E.A))
+    prune!(E2)
+    return E2
 end
 
 function prune!(E::Envelope)
@@ -319,6 +398,7 @@ function prune!(E::Envelope)
 		val,c = E.A[i]
 		E.A[i] = (val, prune(c))
 	end
+    return E
 end
 
 function getindex(c::Candidate, J::Junction)
@@ -327,13 +407,19 @@ function getindex(c::Candidate, J::Junction)
 	end
 	return c.d[J]
 end
+function getindex(c::MCandidate, J::Junction)
+	return c.d[J]
+end
+function getindex(c::Cand, J::Junction)
+	return c.d[J]
+end
 
-function setindex!(c::Candidate, f::Union{Piecewise,Linear}, J::Junction)
+function setindex!(c::Union{Candidate,MCandidate}, f::Union{Piecewise,Linear}, J::Junction)
 	c.d[J] = f
 	c.d[inv(J)] = inv(f)
 end
 
-function (c::Candidate)(J::Junction,x)
+function (c::Union{Candidate,MCandidate})(J::Junction,x)
 	@assert 0 <= x <= J.left_len
 	return c[J](x/J.left_len) * J.right_len
 end
@@ -373,12 +459,11 @@ function print_junction(bt::BoundaryTriangulation, J::Junction)
 	for i in 0:J.right_len-1
 		@show i, bt.backwardfan[(i,J)]
 	end
-
 end
 
 #junction_crossings=Dict()
 
-function trace_forwards(s::State, bt::BoundaryTriangulation, c::Candidate)
+function trace_forwards(s::State, bt::BoundaryTriangulation, c::Union{Candidate,MCandidate})
 	@assert 0<= s.x <=1
 	i,J = bt.forward[s.e]
 	
@@ -397,6 +482,9 @@ function trace_forwards(s::State, bt::BoundaryTriangulation, c::Candidate)
 	=#
 	if j==J.right_len
 		@assert fx - j < 0.00000001
+		println("hold your horses")
+        @show s
+		fx = T(j)
 		j=j-1
 	end
 	#=
@@ -409,7 +497,7 @@ function trace_forwards(s::State, bt::BoundaryTriangulation, c::Candidate)
 	end
 	=#
 
-	return State(fx-Int(floor(fx)), bt.backwardfan[(j,J)])
+	return State(fx-j, bt.backwardfan[(j,J)])
 end
 
 function trace_backwards(s::State, bt::BoundaryTriangulation, c::Candidate)
@@ -472,6 +560,16 @@ function random_candidate(bt,depth)
 	return c
 end
 
+function random_cand(bt, thickness)
+    d=Dict{Junction, DiscreteHomeo}()
+    for j in bt.junctions
+        d[j] = random_discrete_homeo(j, thickness)
+        d[inv(j)] = inv(d[j])
+    end
+
+    return Cand(bt, ArrayDict{Junction,DiscreteHomeo}(d))
+end
+
 
 function uniform(x,y)
 	@assert y>=x
@@ -479,29 +577,26 @@ function uniform(x,y)
 end
 
 
-function approximant(x, time)
-	if x==Inf
+function approximant(x, time) #return closest rational approximant, but as a float
+	if isnan(x) || isinf(x)
 		return x
-	elseif x==Inf || x==-Inf
-		return 1//0
 	elseif x < 0
 		-approximant(-x, time)
 	elseif abs(x) > 1
-		1//approximant(1/x, time)
+		1/approximant(1/x, time)
 	else
-		rationalize(x; tol=10/time)
+		T(rationalize(x; tol=10/time))
 	end
 end
 
-function approximant_all_slopes(c::Candidate; time=10000)
-	return [approximant(x,time) for x in all_slopes(c; time=time)]
+function approximant_all_slopes(c::Union{Candidate, MCandidate}; time=10000)
+	return T[approximant(x,time) for x in all_slopes(c; time=time)]
 end
-function all_slopes(c::Candidate; time=200)
-	return [slope(c; s=State(0.023423,rung), time=time) for rung in c.bt.firstrungs]
+function all_slopes(c::Union{Candidate,MCandidate}; time=200)
+	return T[slope(c, i; time=time) for i in 1:length(c.bt.rungs)]
 end
-
-function all_uncertain_slopes(c::Candidate; time=200)
-	return [uncertain_slope(c; s=State(0.023423,rung), time=time) for rung in c.bt.firstrungs]
+function all_uncertain_slopes(c::Union{Candidate,MCandidate}; time=200)
+	return Measurement{Float64}[uncertain_slope(c, i; time=time) for i in 1:length(c.bt.rungs)]
 end
 
 #=
@@ -533,28 +628,26 @@ end
 =#
 
 
-#todo: return confidence interval, and allow to improve the confidence interval with more work.
-function slope(c::Candidate; time=200, s=State(0.312423, (1,0)), verbose=false)
+#workhorse slope function. Just tries to start tracing from a state
+function _slope(c::Union{Candidate,MCandidate}, s::State; time=200)
 	#weight=T[0,0]
+    W = c.bt.weights
+    
 	w1=T(0)
 	w2=T(0)
 
 	#weight .+= c.bt.weights[s.e]
-	x=c.bt.weights[s.e]
+	x=W[s.e]
 	w1+=x[1]
 	w2+=x[2]
 	while abs(w1) + abs(w2) < time
-		if verbose
-			@show s
-		end
 		s=trace_forwards(s, c.bt, c)
 		#weight .+= c.bt.weights[s.e]
-		x=c.bt.weights[s.e]
+		x=W[s.e]
 		w1+=x[1]
 		w2+=x[2]
 		#println(weight)
 	end
-
 
 	#=
 	for i in 1:20
@@ -564,9 +657,57 @@ function slope(c::Candidate; time=200, s=State(0.312423, (1,0)), verbose=false)
 		println(weight)
 	end
 	=#
-	return clip(w2/w1, 10)
+
+	return (w1,w2)
 end
 
+function show_trace(c::Union{Candidate,MCandidate}; time=50)
+    for j in 1:2
+        s=State(RAND_REAL, c.bt.rungs[j][1][1])
+        @show s
+        println("cusp $(j)")
+        for i in 1:time
+            s=trace_forwards(s, c.bt, c)
+            @show s
+        end
+    end
+end
+
+
+
+const RAND_REAL=0.312432
+function slope(c::Union{Candidate, MCandidate}, i::Int; time=200)
+	w1,w2 = _slope(c, State(RAND_REAL,  c.bt.rungs[i][1][1]), time=time)
+	if abs(w1)<=1
+		return NaN
+		for ladder in c.bt.rungs[i][2:end]
+			w1p,w2p = _slope(c, State(RAND_REAL, ladder[1]), time=time)
+			@assert w1p <= 1
+			if sign(w2p) != sign(w2)
+				return NaN
+			end
+		end
+	end
+	#@show w1,w2
+	return clip(w2/w1, CLIP)
+end
+
+function uncertain_slope(c::Union{Candidate, MCandidate}, i::Int; time=200)
+	w1,w2 = _slope(c, State(RAND_REAL, c.bt.rungs[i][1][1]), time=time)
+	if abs(w1)<=1
+		return NaN
+		for ladder in c.bt.rungs[i][2:end]
+			w1p,w2p = _slope(c, State(RAND_REAL, ladder[1]), time=time)
+			@assert w1p <= 1
+			if sign(w2p) != sign(w2)
+				return measurement(NaN)
+			end
+		end
+	end
+	return clip(measurement(w2,1)/w1, CLIP)
+end
+
+#=
 function uncertain_slope(c::Candidate; time=200, s=State(0.312423, (1,0)))
 	#weight=T[0,0]
 	w1=T(0)
@@ -595,8 +736,9 @@ function uncertain_slope(c::Candidate; time=200, s=State(0.312423, (1,0)))
 		println(weight)
 	end
 	=#
-	return clip(measurement(w2,1)/w1, 10)
+	return clip(measurement(w2,1)/w1, CLIP)
 end
+=#
 
 function clip(x, bounds)
 	ret = max(min(x, bounds), -bounds)
@@ -635,17 +777,37 @@ function comp(S::Type{Eq}, x, y)
 	return x==y
 end
 
+function hasnan(s)
+	ret = any(map(isnan,s))
+	if ret
+		#println("rejecting $(s)")
+	end
+	return ret
+end
+
+function inclosure(e::Envelope{S}, x::Vector{T}) where {S, T}
+    return any(comp(S, x, y[1]) for y in e.A)
+end
+
 function push!(e::Envelope{S}, x::Tuple{Vector{T},Candidate}) where {S}
 	lock(e.L) do
-		if !any(comp(S, x[1], y[1]) for y in e.A)
+		if !hasnan(x[1]) && !any(comp(S, x[1], y[1]) for y in e.A)
 			filter!(y->!comp(S,y[1],x[1]), e.A)
 			push!(e.A, x)
 		end
 	end
 end
 
+function push!(e::Envelope, e2::Envelope)
+	for i in e2.A
+		push!(e,i)
+	end
+end
+
 function push!(e::Envelope{S}, x::Tuple{Union{NTuple{N,R}, Vector{R}},Candidate}) where {S, N, R <: Real}
-	push!(e, (T[x[1]...], x[2]))
+	if !hasnan(x[1])
+		push!(e, (T[x[1]...], x[2]))
+	end
 end
 
 function push!(e::Envelope, x::Candidate)
@@ -658,8 +820,7 @@ struct Longitude
 end
 
 function slopes(l::Longitude)
-	tmp = [sum(l.weights[i]*bt.weights[(i,j)] for (i,j) in edgelist) for edgelist in bt.alledges]
-	if false
+	tmp = [sum(l.weights[i]*l.bt.weights[(i,j)] for (i,j) in edgelist) for edgelist in l.bt.alledges]
 	for (ind,i) in enumerate(tmp)
 		#=
 		for x in [i=> l.weights[i] for i in 0:length(l.weights)-1]
@@ -668,7 +829,7 @@ function slopes(l::Longitude)
 		@show i
 		@show abs.(i .- round.(Int,i))
 		=#
-		c=longitude_to_candidate(bt,l.weights)
+		#c=longitude_to_candidate(bt,l.weights)
 		#=
 		if sum(abs.(i .- round.(Int,i))) > 0.0001
 			@show slope(c, s=State(0.5, bt.firstrungs[1]), verbose=true)
@@ -677,8 +838,7 @@ function slopes(l::Longitude)
 
 		@assert sum(abs.(i .- round.(Int,i))) <= 0.0001
 	end
-end
-	return [round.(Int,sum(l.weights[i]*bt.weights[(i,j)] for (i,j) in edgelist)) for edgelist in bt.alledges]
+	return [round.(Int,sum(l.weights[i]*l.bt.weights[(i,j)] for (i,j) in edgelist)) for edgelist in l.bt.alledges]
 end
 
 function relu(x)
@@ -687,6 +847,10 @@ end
 
 
 function objective(::Type{Upper}, slope, old_slope, target)
+	if any(map(isnan, slope))
+		return -100.0
+	end
+	@assert length(slope)==length(old_slope)==length(target)
 	tmp = sum(relu.(slope.-old_slope) .- 10 * relu.(slope .- target) .- 10 * relu.(old_slope .- slope))
 	@assert !isnan(tmp)
 	@assert !isinf(tmp)
@@ -694,6 +858,10 @@ function objective(::Type{Upper}, slope, old_slope, target)
 	#return sum(slope)
 end
 function objective(::Type{Lower}, slope, old_slope, target)
+	if hasnan(slope)
+		return -100.0
+	end
+	@assert length(slope)==length(old_slope)==length(target)
 	tmp = sum(relu.(old_slope.-slope) .- 10 * relu.(target .- slope) .- 10 * relu.(slope.-old_slope))
 	@assert !isnan(tmp)
 	@assert !isinf(tmp)
@@ -701,6 +869,70 @@ function objective(::Type{Lower}, slope, old_slope, target)
 	#return sum(slope)
 end
 
+function Mannealing(f, initial, _jiggle, betastart, betafinish, nsteps; verbose=true, minacc = 100, maxacc = 5000, radius=0.001)
+	#linear annealing on range betastart, betafinish
+    current = to_mutable(initial)
+	curracc = minacc
+	currval = f(current; acc=curracc)
+	reject_count = 0
+	accept_count = 0
+    working = to_mutable(initial) #lazy way to copy
+
+	vals=[]
+	push!(vals,currval)
+	for (i,currbeta) in zip(1:nsteps, range(betastart,betafinish, nsteps))
+        copy_to!(current, working)
+        jiggle!(working, radius)
+		jig = working
+		newacc = minacc
+		newval = f(jig; acc=minacc)
+
+		r=rand()
+
+		@label here
+		dE = exp(currbeta * (-newval+ currval))
+		prob = 1/(1+dE)
+		#prob will be an interval
+	
+		#@show prob
+		if r > prob
+			reject_count += 1
+		elseif r < prob
+            copy_to!(jig, current)#current = jig
+			currval = newval
+			curracc = newacc
+			accept_count += 1
+		elseif (curracc >= maxacc && newacc >= maxacc)
+			println("not enough accuracy")
+			@show prob, dE
+			@show currval
+			@show newval
+	#		@assert false
+		else #improve the accuracy of our computation
+			if newacc < maxacc
+				newacc *= 3
+				newval = f(jig; acc=newacc)
+			end
+			if curracc < newacc
+				curracc *= 3
+				currval = f(current; acc = curracc)
+			end
+			@goto here
+		end
+		if verbose
+			push!(vals, currval)
+		end
+
+		if verbose && i%10000 == 0
+			@show (approximant_all_slopes(current))
+			@show (accept_count, reject_count) 
+			p=plot(1:length(vals), vals)
+			display(p)
+		end
+	end
+	@show (accept_count, reject_count)
+    return to_static(current)
+end
 function annealing(f, initial, jiggle, betastart, betafinish, nsteps; verbose=true, minacc = 100, maxacc = 5000)
 	#linear annealing on range betastart, betafinish
 	current = initial
@@ -758,7 +990,6 @@ function annealing(f, initial, jiggle, betastart, betafinish, nsteps; verbose=tr
 			p=plot(1:length(vals), vals)
 			display(p)
 		end
-
 	end
 	@show (accept_count, reject_count)
 	return current
@@ -769,9 +1000,9 @@ function try_improve(E::Envelope{S}; nsubdivide=0, iters=50000, time=1000, targe
 	accurate_E=Envelope{S}()
 	@threads for i in 1:length(E.A)
 		_,oldcand = E.A[i]
-		old_v = T.(approximant_all_slopes(oldcand))
+		old_v = approximant_all_slopes(oldcand)
 
-		for i in 1:nsubdivide
+		for j in 1:nsubdivide
 			oldcand = subdivide(oldcand)
 		end
 
@@ -780,9 +1011,25 @@ function try_improve(E::Envelope{S}; nsubdivide=0, iters=50000, time=1000, targe
 			continue
 		end
 
-		newcand = annealing((c; acc=100)->objective(S, all_uncertain_slopes(c,time=acc), old_v, target), oldcand, c->jiggle(c,radius), beta, beta, iters; verbose=false)
-		new_v = T.(approximant_all_slopes(newcand))
-		@show old_v, new_v
+		@time newcand = Mannealing((c; acc=100)->objective(S, all_uncertain_slopes(c,time=acc), old_v, target), oldcand, c->jiggle(c,radius), beta, beta, iters; verbose=false, radius=radius)
+		new_v = approximant_all_slopes(newcand)
+        #@show old_v, new_v 
+        print(old_v)
+        print("->[")
+        for (x,val) in zip(sign.(new_v .- old_v), new_v)
+            a = S==Upper() ? 1 : -1
+            if x * a > 0
+                col = :red
+            elseif x * a < 0
+                col = :green
+            else
+                col = :yellow
+            end
+            printstyled(val, color = col)
+            print(",")
+        end
+        print("]")
+        println()
 		push!(accurate_E, (new_v, newcand))
 	end
 	return accurate_E
@@ -790,18 +1037,17 @@ end
 
 length(e::Envelope) = length(e.A)
 
-function random_trials(bt; nsubdivide=2)
-	N=100000
+function random_trials(bt; nsubdivide=3, ntrials=100000)
 	E=PEnvelope()
 	#trials=[T[] for i in 1:N]
 
 
 	#inrange(x) = all(-5 < i < 5 for i in x)
 
-	@threads for i in 1:N
+	@threads for i in 1:ntrials
 		c=random_candidate(bt,nsubdivide)
 		#trials[i] = all_slopes(c)
-		push!(E, (all_slopes(c),c))
+		push!(E, (approximant_all_slopes(c, time=200),c))
 	end
 
 	@show [x[1] for x in E.A]
@@ -820,7 +1066,7 @@ function extreme_candidates(bt)
 	Elower=Envelope{Lower}()
 	Eupper=Envelope{Upper}()
 
-	@threads :greedy for tmp in Iterators.product(([Piecewise(Linear(),Linear(),0.01, 0.99), Piecewise(Linear(),Linear(),0.99, 0.01)] for i in 1:length(bt.junctions))...)
+	@threads :greedy for tmp in Iterators.product(([Piecewise(Linear(),Linear(),0.01, 0.99), Piecewise(Linear(),Linear(),0.99, 0.01), Linear()] for i in 1:length(bt.junctions))...)
 		c=Candidate(bt, Dict{Junction, Union{Linear,Piecewise}}(j=>f for (j,f) in zip(bt.junctions,tmp)))
 		ss = approximant_all_slopes(c)
 		push!(Elower, (ss,c))
@@ -863,13 +1109,6 @@ function longitude_to_candidate(bt, longitude)
 	return Candidate(bt,d)
 end
 
-function plotjs(A::Vector{Envelope})
-	PlotlyJS.plot([_plotjs(E) for E in A])
-end
-
-function plotjs(E::Envelope)
-	plotjs(Envelope[E])
-end
 
 function inbounds(pt)
 	return all(abs.(pt) .<= CLIP)
@@ -877,94 +1116,55 @@ end
 
 function staircase(E::Envelope{Upper})
 	pts = [x[1] for x in E.A]
-	filter(inbounds, sort!(pts, by=x->x[1]))
+	pts=filter(inbounds, sort!(pts, by=x->x[1]))
 	return sort(vcat(pts,[(pts[i][1], pts[i+1][2]) for i in 1:length(pts)-1]), by=x->(x[1],-x[2]))
 end
+
+function crevices(E::Envelope{Upper})
+	pts = [x[1] for x in E.A]
+	pts=filter(inbounds, sort!(pts, by=x->x[1]))
+    return [[pts[i][1], pts[i+1][2]] for i in 1:length(pts)-1]
+end
+
 function staircase(E::Envelope{Lower})
 	pts = [x[1] for x in E.A]
-	filter(inbounds, sort!(pts, by=x->x[1]))
+	pts = filter(inbounds, sort!(pts, by=x->x[1]))
 	return sort(vcat(pts,[(pts[i+1][1], pts[i][2]) for i in 1:length(pts)-1]), by=x->(x[1],-x[2]))
 end
 
-const TAUT_COLOUR = "#00cc96"
-const OBSTRUCTION_COLOUR ="#ef553b" 
-const LONGITUDE_COLOUR = "#636EFA"
-
-function _plotjs(E::Envelope{S}; color=TAUT_COLOUR) where {S<:Union{Upper,Lower}}
+function crevices(E::Envelope{Lower})
 	pts = [x[1] for x in E.A]
-	dim = length(pts[1])
-
-	if dim==2
-		all_pts = staircase(E)
-		PlotlyJS.scatter(x=[x[1] for x in all_pts],y=[x[2] for x in all_pts], mode="lines", line=attr(color=color))
-	else
-		@assert false
-	end
+	pts = filter(inbounds, sort!(pts, by=x->x[1]))
+    return [[pts[i+1][1], pts[i][2]] for i in 1:length(pts)-1]
 end
 
-function _plotjs(E::Envelope; color=OBSTRUCTION_COLOUR)
-	pts = filter(inbounds, [x[1] for x in E.A])
-	dim = length(pts[1])
-
-	if dim==2
-		PlotlyJS.scatter(x=[x[1] for x in pts],y=[x[2] for x in pts], mode="markers", marker=attr(color=color))
-	elseif dim==3
-		PlotlyJS.scatter(x=[x[1] for x in pts],y=[x[2] for x in pts], z=[x[3] for x in pts], mode="markers", type="scatter3d")
-	else
-		@assert false	
-	end
-end
-
-function _plotjs(E1::Envelope{Lower}, E2::Envelope{Upper}; color=TAUT_COLOUR)
-	#=
-	pts1 = [x[1] for x in E1.A]
-	pts2 = [x[1] for x in E2.A]
-
-	@assert length(pts1[1])==2
-
-	sort!(pts1, by=x->x[1])
-	sort!(pts2, by=x->x[1])
-	all_pts1=sort(vcat(pts1,[(pts1[i+1][1], pts1[i][2]) for i in 1:length(pts1)-1]), by=x->(x[1],-x[2]))
-	all_pts2=sort(vcat(pts2,[(pts2[i][1], pts2[i+1][2]) for i in 1:length(pts2)-1]), by=x->(x[1],-x[2]))
-	=#
-
-	all_pts1=staircase(E1)
-	all_pts2=staircase(E2)
-
-	if all(all_pts1[1] .<= all_pts2[1])
-		pushfirst!(all_pts2, [all_pts1[1][1], all_pts2[1][2]])
-	end
-
-	if all(all_pts1[end] .<= all_pts2[end])
-		push!(all_pts1, [all_pts2[end][1], all_pts1[end][2]])
-	end
-
-	return [PlotlyJS.scatter(x=[x[1] for x in all_pts1],y=[x[2] for x in all_pts1], mode="lines", fill="tonexty", fillcolor="#00000000", line=attr(color=color)),
-			PlotlyJS.scatter(x=[x[1] for x in all_pts2],y=[x[2] for x in all_pts2], mode="lines", fill="tonexty",line=attr(color=color)),
-			]
-end
-
-function clear()
-	deletetraces!(p,0:10)
-end
 
 function normalizedchi(L::Longitude)
 	ss=slopes(L)
 	chi = -sum(L.weights)//2
 	npunctures = [gcd(a,b) for (a,b) in ss]
 	g=gcd(npunctures...)
-	closed_chi = chi + npunctures[2] + npunctures[1]
+	closed_chi = chi + sum(npunctures)#npunctures[2] + npunctures[1]
 	return closed_chi/g
+end
+
+function updateith(A::Vector{T}, i::Int, val::T) where {T}
+    B = copy(A)
+    B[i]=val
+    return B
 end
 
 function constraints(L::Longitude)
 	ss = slopes(L)
-	chi = -sum(L.weights)//2
+    rats = map(slope_to_rat, ss)
+    ncusps = length(ss)
+    chi = Int(-sum(L.weights)//2) #Euler characteristic of the punctured surface
 	#@show chi
 
 	npunctures = [gcd(a,b) for (a,b) in ss]
 	#@show npunctures
-	closed_chi = chi + npunctures[2] + npunctures[1]
+    closed_chi = chi + sum(npunctures)
+
 
 	#=
 	if closed_chi >= 0
@@ -974,8 +1174,24 @@ function constraints(L::Longitude)
 	end
 	=#
 
+
+    #=
 	q,p = ss[1]
 	s,r = ss[2]
+
+    @assert q>=0
+    @assert s>=0
+    =#
+
+    nladders = map(x->length(x)//2, rungs)
+
+    #prongcounts = (q*nladders[1]//gcd(p,q), s*nladders[2]//gcd(r,s))
+
+    prongcounts = [ss[i][1] * nladders[i] //gcd(ss[i][1], ss[i][2]) for i in 1:ncusps]
+
+    @assert closed_chi == -sum(npunctures[i]*(prongcounts[i]-2) for i in 1:ncusps)//2
+
+    #@assert closed_chi==-sum(npunctures[1]*(prongcounts[1]-2) + npunctures[2]*(prongcounts[2]-2))//2
 	#=
 		if q-closed_chi == 0 
 			return (0,0)
@@ -984,7 +1200,6 @@ function constraints(L::Longitude)
 		end
 	=#
 
-	ret = []
 	#@show (q,p,s,r)
 	#@show npunctures
 	ret = []
@@ -993,10 +1208,46 @@ function constraints(L::Longitude)
 	
 	#@show chi+npunctures[1]
 	#@show chi+npunctures[2]
-	push!(ret, (p//q, constraint((r+s//2),s,chi+npunctures[1])))
-	push!(ret, (p//q, -constraint(-(r+s//2),s,chi+npunctures[1])))
-	push!(ret, (constraint(p,q,chi+npunctures[2]), r//s))
-	push!(ret, (-constraint(-p,q,chi+npunctures[2]), r//s))
+    #
+    #
+
+    for i in 1:ncusps
+        bounds, info = constraint3(ss[i], chi + sum(npunctures) - npunctures[i])
+        for (j,bound) in enumerate(bounds)
+            info_full = (info...,npunc=npunctures[i], int_prongs = [prongcounts[i] for j in 1:ncusps if i !=j], ext_prongs=prongcounts[i], longitude=L.weights, ss=ss, dir=(i, j==1 ? -1 : 1))
+            push!(ret, (updateith(rats, i, slope_to_rat(bound)), info_full))
+        end
+    end
+
+    #=
+
+    #if npunctures[2]==1
+        x,info = constraint3(r,s,chi+npunctures[1], upper=true)
+        push!(ret, ((p//q, x), (info...,npunctures=npunctures[2],interior_prong = prongcounts[1], exteriorprong=prongcounts[2], longitude=L.weights, ss=ss, dir=:up)))
+
+        x,info = constraint3(r,s,chi+npunctures[1], upper=false)
+        push!(ret, ((p//q, x),(info...,npunctures=npunctures[2],interior_prong = q*nladders[1]//gcd(p,q), exteriorprong=prongcounts[2],longitude=L.weights, ss=ss, dir=:down)))
+    #end
+    #if npunctures[1]==1
+        x,info = constraint3(p,q,chi+npunctures[2], upper=true)
+        push!(ret, ((x, r//s),(info...,npunctures=npunctures[1],interior_prong=s*nladders[2]//gcd(r,s), exteriorprong=prongcounts[1],lonigtude=L.weights, ss=ss, dir=:right)))
+
+        x,info = constraint3(p,q,chi+npunctures[2], upper=false)
+        push!(ret, ((x, r//s), (info...,npunctures=npunctures[1],interior_prong=s*nladders[2]//gcd(r,s), exteriorprong=prongcounts[1],longitude=L.weights,ss=ss, dir=:left)))
+    #end
+    =#
+
+    #=
+    if 0 in Iterators.flatten(ret)
+        println("----")
+        @show npunctures
+        @show ss
+        @show (p//q,constraint3(r,s,chi+npunctures[1]; verbose=true))
+        @show (p//q, -constraint3(-r,s,chi+npunctures[1]; verbose=true))
+        @show (constraint3(p,q,chi+npunctures[2]; verbose=true), r//s)
+        @show (-constraint3(-p,q,chi+npunctures[2]; verbose=true), r//s)
+    end
+    =#
 
 	return ret
 
@@ -1065,15 +1316,14 @@ function intersection_weights(bt::BoundaryTriangulation, loop::Vector{Track})
 	return weights
 end
 
-function compute_loop(bt,rungs)
+function compute_loop(bt,rungs) #rungs is a list of rungs, all in the first ladder
 	S=Set{Track}(rungs)
 	Q=Queue{Vector{Track}}()
-	for rung in rungs
+	for rung in circshift(rungs,-1) #the second rung is the bottommost
 		enqueue!(Q, Track[rung])
 	end
 	while !isempty(Q)
 		l=dequeue!(Q)
-		@show l
 
 		_,J=bt.forward[l[end]]
 		for k in 0:J.right_len-1
@@ -1091,7 +1341,8 @@ end
 
 function compute_vertical_weights!(bt::BoundaryTriangulation)
 	for runglist in bt.rungs
-		loop = compute_loop(bt, runglist)
+		loop = compute_loop(bt, runglist[1])
+		@show loop
 		weights = intersection_weights(bt, loop)
 		for (k,v) in weights
 			bt.weights[k] = SVector{2,T}([bt.weights[k][1], v])
@@ -1099,28 +1350,207 @@ function compute_vertical_weights!(bt::BoundaryTriangulation)
 	end
 end
 
-function constraint(r,s,chi) #careful, it's possible gcd(r,s)=/= 1
-	if s<=0
-		return CLIP
+#=
+function constraint2(r::Int, s::Int, chi)
+	#r/s is the fiber slope
+	#the degeneracy slope is 1/0
+	
+	@assert s>=0
+	if s==0
+		return NaN
+	end
+	@assert s>0
+
+	g=gcd(r,s)
+	r=r//g
+	s=s//g
+	chi=chi//g
+
+	if s+chi == 0
+		return NaN
+	elseif chi>=0
+		return r//s
+	elseif s+chi > 0
+		n=floor(r//s)
+
+		rprime = r-n*s
+		sprime = s
+
+		iota = sprime #intersection number between fiber and degeneracy
+
+		m=ceil(chi//iota)
+		@show chi,iota,m
+
+		#=
+		(0,1)/ + (s,r)/chi
+
+		(0,1)/iota + (s,r)/(m*iota)
+		degeneracy/iota + fiber/(m*iota)
+
+		(0,1)*m + (sprime,rprime)
+		=#
+
+		return n//1+rprime//(s+m)
+		#when chi is big, it should return something close to the degeneracy slope
+		#when chi is small, it should return close to the fiber slope
+	else 
+		return NaN
+	end
+
+end
+=#
+
+
+#=
+function constraint(r::Int,s::Int,chi) #careful, it's possible gcd(r,s)=/= 1
+	#appears that this is correct, at least when r=1 mod s
+	
+	@assert s>=0
+	if s==0
+		return NaN
 	end
 	@assert s > 0
 	n=floor(r//s)
 
-	if s+chi == 0
-		return CLIP
-	elseif s+chi > 0
-		#return n//1 + (r-n*s)//(s + chi)
-		return r//(s + chi)
-	else
-		return CLIP
+	#=
+	if abs(chi) > abs(s)/2
+		return NaN
 	end
+	=#
+
+	if s+chi == 0
+		return NaN
+	elseif chi>=0
+		return r//s
+	elseif s+chi > 0
+		return n//1 + (r-n*s)//(s + chi)
+		#return r//(s + chi)
+	else
+		return NaN
+	end
+end
+=#
+
+function n_orthogonal(v::AbstractVector{Int}) #Find a determinant 1 matrix that sends v to [k,0]
+    @assert length(v)==2
+    g = gcd(v[1], v[2])
+    A = n_orthogonal(v, [1 0; 0 1])
+    @assert A*v == [g,0]
+    @assert A[1,1]*A[2,2]-A[1,2]*A[2,1]==1
+    return A
+end
+
+function n_orthogonal(v::AbstractVector{Int},A::Matrix{Int})
+    r,s = v
+    if v[2]==0 && v[1] > 0
+        return A
+    else
+        if r < 0 && s < 0 
+            B=[-1 0; 0 -1]
+        elseif r <= 0
+            B=[0 1; -1 0]
+        elseif s < 0
+            B=[0 -1; 1 0]
+        else
+            @assert r>=0
+            @assert s>=0
+            if r >= s
+                B = [1 -1; 0 1]
+            else 
+                B = [1 0; -1 1]
+            end
+        end
+        return n_orthogonal(B*v, B*A)
+    end
+end
+
+function constraint3(fiber_slope::Slope, chi::Int; verbose=false)
+    #@show r, s, chi
+
+    g=gcd(fiber_slope...,chi)
+    fiber_slope = Slope(fiber_slope .// g)
+    chi = Int(chi//g)
+
+    #=
+    if s==0
+        return (NaN, "fractional DT = 0")
+    end
+    =#
+    #=
+    if chi >= 0
+        return (r//s, "chi>=0")
+    end
+    =#
+
+    A = n_orthogonal(fiber_slope)
+    Ainv = round.(Int,inv(A))
+
+    degen_slope = A * [0,1]
+    degen = degen_slope[1]//degen_slope[2]
+
+    if chi > 0
+        return [Ainv*[-1,0], Ainv*[1,0]], (chi=chi, degen_slope=degen_slope, upper=1//0, lower=-1//0, A=A)
+    end
+
+    upperbound = minimum(Int(ceil(degen*chi0))//chi0 for chi0 in 1:max(-chi,1))
+    lowerbound = maximum(Int(floor(degen*chi0))//chi0 for chi0 in 1:max(-chi,1))
+
+    if verbose
+        @show A
+        @show fiber_slope
+        @show chi
+        @show degen_slope
+        @show degen
+        @show upperbound
+        @show lowerbound
+    end
+
+    return [Ainv*[lowerbound,1],Ainv*[upperbound,1]],  (chi=chi, degen_slope=degen_slope, upper=upperbound, lower=lowerbound, A=A)
 end
 
 function bound(E::Envelope{Upper}, r)
-	pts = filter(pt-> pt[1] >= r, [x[1] for x in E.A])
-	return minimum(x[2] for x in pts; init=CLIP)
-end
-function bound(E::Envelope{Lower}, r)
-	pts = filter(pt-> pt[1] <= r, [x[1] for x in E.A])
+	pts = filter(pt-> pt[1] > r+0.0000001, [x[1] for x in E.A])
 	return maximum(x[2] for x in pts; init=-CLIP)
 end
+function bound(E::Envelope{Lower}, r)
+	pts = filter(pt-> pt[1] < r-0.000001, [x[1] for x in E.A])
+	return minimum(x[2] for x in pts; init=CLIP)
+end
+
+function bound(E::Envelope{Upper}, s::Tuple, i::Int) #s is a tuple of slopes, and i is the coordinate in which we want to maximize
+    @assert length(s)==2
+
+    if i==2
+        pts = filter(pt-> pt[1] > s[1]+0.0000001, [x[1] for x in E.A])
+        return maximum(x[2] for x in pts; init=-CLIP)
+    else
+        @assert i==1
+        pts = filter(pt-> pt[2] > s[2]+0.0000001, [x[1] for x in E.A])
+        return maximum(x[1] for x in pts; init=-CLIP)
+    end
+end
+function bound(E::Envelope{Lower}, s::Tuple, i::Int) #s is a tuple of slopes, and i is the coordinate in which we want to maximize
+    @assert length(s)==2
+
+    if i==2
+        pts = filter(pt-> pt[1] < s[1]-0.000001, [x[1] for x in E.A])
+        return minimum(x[2] for x in pts; init=CLIP)
+    else
+        @assert i==1
+        pts = filter(pt-> pt[2] < s[2]-0.000001, [x[1] for x in E.A])
+        return minimum(x[1] for x in pts; init=CLIP)
+    end
+end
+
+#=
+function components(L::Longitude)
+	for J in L.bt.junctions
+		forward = []
+		backward = []
+		for k in 0:J.left_len-1
+			for t in L.bt.backwardfan[(J,k)]
+			end
+		end
+	end
+end
+=#
