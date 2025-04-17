@@ -209,7 +209,7 @@ function find_longitudes_hom(fans, top_bot_pairs) #find longitudes by homology c
 	ch=Channel(10*Threads.nthreads())
 
 	function search_interval(a)
-        println("Searching $(a) from $(Threads.threadid())")
+        #println("Searching $(a) from $(Threads.threadid())")
 		model = Model(HiGHS.Optimizer)
 		set_silent(model)
 		@variable(model, x[1:n], Int)
@@ -238,7 +238,7 @@ function find_longitudes_hom(fans, top_bot_pairs) #find longitudes by homology c
                         put!(ch, O)
                     catch e
                         if e isa InvalidStateException
-                            println("terminating")
+                            #println("terminating")
                             break
                         else
                             rethrow(e)
@@ -247,7 +247,7 @@ function find_longitudes_hom(fans, top_bot_pairs) #find longitudes by homology c
                 end
             end
             if !isopen(ch)
-                println("terminating")
+                #println("terminating")
                 break
             end
 		end

@@ -118,7 +118,8 @@ function compute_longitudes(bt; nlongs=100)
 	for (ss, ls) in long_dict
 		_, i = findmin(x-> (count(y->y==0, x), sum(x.^2)), ls)
 		c=longitude_to_candidate(bt,ls[i])
-		push!(Elong, (ss, c))
+		#push!(Elong, (ss, c))
+        push!(Elong, c)
 		push!(longitudes, ls[i])
 	end
 	return Elong, longitudes
@@ -156,8 +157,12 @@ function load(isosig; refresh=false, nlongs=100)
 		ncusps = length(bt.firstrungs)
 
 		Elong, longitudes = compute_longitudes(bt; nlongs=nlongs)
-		Eupper = Envelope{Upper}(copy(Elong.A))
-		Elower = Envelope{Lower}(copy(Elong.A))
+		#Eupper = Envelope{Upper}(copy(Elong.A))
+		#Elower = Envelope{Lower}(copy(Elong.A))
+
+        Eupper= Envelope{Upper,Float64,Cand{DiscreteHomeo}}()
+        Elower= Envelope{Lower,Float64,Cand{DiscreteHomeo}}()
+
 
 		tup = (bt=bt, Eupper=Eupper, Elower=Elower, Elong=Elong, longitudes=longitudes)
 		serialize("batch/$(isosig).jls", tup)
@@ -215,10 +220,12 @@ end
 
 function runjob(isosig::String; rt=0, ex=false, reg=false, nlongs=100, target=nothing, fromscratch=false, doprune=false, preprune=false, refresh=false, verbose=false)
 	tup = load(isosig, nlongs=nlongs, refresh=refresh)
+    #=
 	global p=quickview(tup; isosig=isosig)
 	if isinteractive() && verbose
 		display(p)
 	end
+    =#
 
 	ncusps = length(tup.bt.firstrungs)
 
@@ -318,12 +325,19 @@ function runjob(isosig::String; rt=0, ex=false, reg=false, nlongs=100, target=no
 	end
 
 	if rt>0
-		randE = random_trials(tup.bt,ntrials=rt)
+		randE = random_trials(tup.bt,ntrials=rt,thickness=5, roundmode=DOWN)
         #todo: multithread this
 		@threads for (x,c) in randE.A
-			push!(Eupper, c)
-			push!(Elower, c)
+            push!(Eupper, (x,c))
+            #push!(Elower, (x,c))
 		end
+
+		randE = random_trials(tup.bt,ntrials=rt,thickness=5, roundmode=UP)
+		@threads for (x,c) in randE.A
+            push!(Elower, (x,c))
+            #push!(Eupper, (x,c))
+        end
+
         serialize("batch/$(isosig).jls", (bt=tup.bt, Eupper=Eupper, Elower=Elower, Elong=tup.Elong, longitudes=tup.longitudes))
 	end
 
@@ -404,8 +418,8 @@ function obstructions(tup::NamedTuple; isosig="")
     bt=tup.bt
 
     Econstr = PEnvelope()
-    Econstr_upper = Envelope{Upper}()
-    Econstr_lower = Envelope{Lower}()
+    Econstr_upper = Envelope{Upper,Float64}()
+    Econstr_lower = Envelope{Lower,Float64}()
     longitudeDF = DataFrame()
     constrDF = DataFrame()
     long_slopes = []
@@ -477,13 +491,15 @@ function quickview(tup::NamedTuple; isosig="", index=0)
 	Elower = tup.Elower
 
 
-	dummy_candidate=random_candidate(tup.bt,0)
+    #=
 	if isosig == "eLMkbcddddedde_2100"
+        dummy_candidate=random_cand(tup.bt, 1, DOWN)
 		for pt in [(-2,1/2), (-1, 1/3), (-1/2, 1/6), (-1/3, 1/9), (-1/4, 1/12), (-1/5, 1/15), (-1/6, 1/18)]
 			push!(Eupper, (pt, dummy_candidate))
 			push!(Elower, (map(x->-x,pt), dummy_candidate))
 		end
 	end
+    =#
 
 
     @show length(tup.longitudes)
@@ -514,8 +530,8 @@ function quickview(tup::NamedTuple; isosig="", index=0)
 
 
     Econstr = PEnvelope()
-    Econstr_upper = Envelope{Upper}()
-    Econstr_lower = Envelope{Lower}()
+    Econstr_upper = Envelope{Upper,Float64,Cand{DiscreteHomeo}}()
+    Econstr_lower = Envelope{Lower,Float64,Cand{DiscreteHomeo}}()
     longitudeDF = DataFrame()
     constrDF = DataFrame()
     long_slopes = []
@@ -618,14 +634,15 @@ function quickview(tup::NamedTuple; isosig="", index=0)
 
     p=PlotlyJS.plot(layout)
 
-    dummy_candidate=random_candidate(tup.bt,0)
+    dummy_candidate=random_cand(tup.bt,1,DOWN)
 
     #contact structures
-    addtraces!(p, _plotjs(Elower, Envelope{Upper}([([CLIP for i in 1:ncusps], dummy_candidate)]), color=NEG_CONTACT_COLOUR, name="negative contact structures")...)
+    #addtraces!(p, _plotjs(Elower, Envelope{Upper,Float64,Cand{DiscreteHomeo}}([([CLIP for i in 1:ncusps], dummy_candidate)]), color=NEG_CONTACT_COLOUR, name="negative contact structures")...)
 
-    addtraces!(p, _plotjs(Envelope{Lower}([([-CLIP for i in 1:ncusps],dummy_candidate)]), Eupper, color=POS_CONTACT_COLOUR, name="positive contact structures")...)
+    #addtraces!(p, _plotjs(Envelope{Lower,Float64,Cand{DiscreteHomeo}}([([-CLIP for i in 1:ncusps],dummy_candidate)]), Eupper, color=POS_CONTACT_COLOUR, name="positive contact structures")...)
 
     addtraces!(p, _plotjs(Elower, Eupper, name="Z (foliated region)")...)
+    add_trace!(p, _plotjs(Eupper, name="eupper"))
 
 
     if length(Econstr_lower.A) > 0
@@ -995,4 +1012,4 @@ function dump_candidate(c)
 end
 
 
-bad_examples = [38, 95, 160, 214, 278, 338, 356, 370, 406, 448, 453, 470, 473, 485]
+#bad_examples = [38, 95, 160, 214, 278, 338, 356, 370, 406, 448, 453, 470, 473, 485]

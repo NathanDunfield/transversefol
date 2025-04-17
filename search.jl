@@ -1,4 +1,3 @@
-const T=Float64
 using OffsetArrays
 import Base: inv, getindex, setindex!, hash, push!, length
 using DataStructures
@@ -25,83 +24,84 @@ const Slope = SVector{2,Int}
 const MultiSlope{N} = SVector{N,Slope} where N #todo: make all vector of slopes into multislopes
 
 #make this mutable, so that we can do simulated annealing by updating the same struct over and over again.
-struct Piecewise <: Homeo
-	left::Union{Piecewise, Linear}
-	right::Union{Piecewise, Linear}
-	x::T
-	fx::T #x maps to fx
-end #todo: Piecewise should just have a flag letting you lazily invert it.
 
-
-@enum Dir LEFT=1 RIGHT=2
+@enum Dir LEFT=1 RIGHT=2 BOTH=3
 @enum RoundMode DOWN=1 UP=2
 struct DiscreteHomeo <: Homeo
-    left_heights::Vector{T} #sorted list of heights on the left, starting with 0 and ending at 1
-    right_heights::Vector{T} #sorted list of heights on the right
-    ordering::Vector{Dir} #ordering of the left_heights and right_heights, excluding 0s and 1s
+    left_heights::Vector{Rational{Int}} #sorted list of heights on the left
+    right_heights::Vector{Rational{Int}} #sorted list of heights on the right
+    ordering::Vector{Dir} #ordering of the left_heights and right_heights. We should have ordering[1] == ordering[end]==BOTH
     dir::Dir
+    roundmode::RoundMode
 end
 
 function inv(d::DiscreteHomeo) #uses the same underlying array
-    return DiscreteMap(d.right_heights, d.left_heights, d.ordering, inv(d.dir))
+    return DiscreteHomeo(d.right_heights, d.left_heights, d.ordering, inv(d.dir), d.roundmode)
 end
 
 function inv(d::Dir)
-    if d == DOWN
-        return UP
+    if d == LEFT
+        return RIGHT
+    elseif d==RIGHT
+        return LEFT
     else
-        return DOWN
+        @assert d==BOTH
+        return BOTH
     end
 end
 
-function (f::DiscreteHomeo)(r::Rational{Int}, roundmode::RoundMode)
-    if r==f.left_heights[1]
-        return f.right_heights[1]
-    elseif r==f.left_heights[end]
-        return f.right_heights[end]
-    end
+function (f::DiscreteHomeo)(r::Rational{Int})
+    verbose =  false #rand() < 0.01
 
     index_range = searchsorted(f.left_heights, r)
     @assert length(index_range)==1
-    index = index_range[1]
 
-    if roundmode == DOWN
-        curr_leftindex = 1
-        curr_rightindex = 1
+    index = index_range.stop
+
+    if f.roundmode == DOWN
+        curr_leftindex = 0
+        curr_rightindex = 0
 
         for k in 1:length(f.ordering)
             if f.ordering[k] == f.dir
                 curr_leftindex += 1
-            else
-                curr_rightindex +=1
+            elseif f.ordering[k] == inv(f.dir)
+                curr_rightindex += 1
+            else 
+                @assert f.ordering[k] == BOTH
+                curr_leftindex += 1
+                curr_rightindex += 1
             end
             if curr_leftindex == index
-                return right_heights[curr_rightindex]
+                return f.right_heights[curr_rightindex]
             end
         end
     elseif f.roundmode == UP
-        curr_leftindex = length(f.left_heights)
-        curr_rightindex = length(f.right_heights)
+        curr_leftindex = length(f.left_heights)+1
+        curr_rightindex = length(f.right_heights)+1
 
         for k in length(f.ordering):-1:1
             if f.ordering[k] == f.dir
                 curr_leftindex -= 1
+            elseif f.ordering[k] == inv(f.dir)
+                curr_rightindex -= 1
             else
-                curr_rightindex -=1
+                @assert f.ordering[k] == BOTH
+                curr_leftindex-=1
+                curr_rightindex-=1
             end
             if curr_leftindex == index
                 return f.right_heights[curr_rightindex]
             end
         end
     end 
+    @show f.roundmode
+    @show f.ordering
+    @show curr_leftindex
+    @show curr_rightindex
+    @assert false
 end
 
-function random_discrete_homeo(j::Junction, thickness::Int)
-    left_heights = Rational{Int}[i//thickness for i in 0:j.left_len * thickness]
-    right_heights = Rational{Int}[i//thickness for i in 0:j.right_len * thickness]
-    ordering = shuffle(vcat(Dir[LEFT for i in 1:length(left_heights-2)], Dir[RIGHT for i in 1:length(right_heights-2)]))
-    return DiscreteHomeo(left_heights, right_heights, ordering, LEFT)
-end
 
 abstract type Comp
 end
@@ -122,7 +122,6 @@ struct Junction
 	left_len::Int
 	right_len::Int
 end
-
 
 cartesianlength(::Type{Junction}) = 2
 cartesianlength(::Type{Tuple{S,T}}) where {S,T} = cartesianlength(S) + cartesianlength(T)
@@ -172,11 +171,12 @@ struct BoundaryTriangulation
 	backward::ArrayDict{Track, Tuple{Int,Junction}, 2}
 	forwardfan::ArrayDict{Tuple{Int,Junction}, Track, 3}
 	backwardfan::ArrayDict{Tuple{Int,Junction}, Track, 3}
-	weights::ArrayDict{Track, SVector{2,T}, 2}
+	weights::ArrayDict{Track, SVector{2,Float64}, 2}
 	junctions::Vector{Junction}#doesn't include mappings for inverses
 	firstrungs::Vector{Track}#one rung in each cusp
 	rungs::Vector{Vector{Vector{Track}}} #for each cusp, and for each ladder, the list of its rungs
 	alledges::Vector{Vector{Track}}#edges appearing in each cusp
+    ncusps::Int
 	#fans is a list of pairs of fans
 	
 	function BoundaryTriangulation(fans, face_coorientations, firstrungs, alledges, rungs)
@@ -209,18 +209,18 @@ struct BoundaryTriangulation
 			end
 		end
 
-		weights=Dict{Track,SVector{2,T}}()
+		weights=Dict{Track,SVector{2,Float64}}()
 		for l in alledges
 			for track in l
-				weights[track] = SVector{2,T}([0,0])
+				weights[track] = SVector{2,Float64}([0,0])
 			end
 		end
 		for l in rungs
 			for track in l[1] #only assign weight 1 to the first ladder.
-				weights[track] = SVector{2,T}([1,0])
+				weights[track] = SVector{2,Float64}([1,0])
 			end
 		end
-		bt = new(ArrayDict(forward),ArrayDict(backward),ArrayDict(forwardfan),ArrayDict(backwardfan),ArrayDict(weights),junctions,firstrungs, rungs, alledges)
+        bt = new(ArrayDict(forward),ArrayDict(backward),ArrayDict(forwardfan),ArrayDict(backwardfan),ArrayDict(weights),junctions,firstrungs, rungs, alledges, length(rungs))
 
 		compute_vertical_weights!(bt)
 
@@ -228,50 +228,10 @@ struct BoundaryTriangulation
 	end
 end
 
-struct Candidate
-	bt::BoundaryTriangulation
-	d::Dict{Junction, Union{Piecewise,Linear}} #convert to an ArrayDict?
-end
-
 mutable struct Cand{S<:Homeo}
     bt::BoundaryTriangulation
     d::ArrayDict{Junction, S}
 end
-
-
-struct Envelope{S} #keep track of local maxes
-	A::Vector{Tuple{Vector{T},Candidate}}
-	L::SpinLock
-end
-
-includet("mutable_piecewise.jl")
-
-function prunings(p::Piecewise)
-	chnl = Channel{Homeo}(3)
-	put!(chnl, Linear())
-	@async begin
-		for i1 in prunings(p.left)
-			push!(chnl, Piecewise(i1,p.right,p.x,p.fx))
-		end
-		for i2 in prunings(p.right)
-			push!(chnl, Piecewise(p.left,i2,p.x,p.fx))
-		end
-		close(chnl)
-	end
-	return chnl
-end
-
-function complexity(p::Piecewise)
-	return complexity(p.left) + complexity(p.right)
-end
-function complexity(p::Linear)
-	return 1
-end
-
-function prunings(l::Linear)
-	return (Linear(),)
-end
-
 
 #=
 struct Optimistic <: Homeo
@@ -286,24 +246,6 @@ function inv(o::S) where {S<: Union{Optimistic, Pessimistic}}
 end
 =#
 
-function inv(p::Piecewise)
-	Piecewise(inv(p.left),inv(p.right),p.fx,p.x)
-end
-
-function inv(x::Linear)
-	Linear()
-end
-
-function (f::Piecewise)(y::T)
-	@assert 0 <= y <=1
-	if y < f.x
-		ret = f.left(y/f.x) * f.fx
-	else
-		ret = f.right((y-f.x)/(1-f.x)) * (1-f.fx) + f.fx
-	end
-	@assert 0 <= ret <= 1
-	return ret
-end
 
 #=
 function (f::Optimistic)(y::T)
@@ -313,11 +255,51 @@ function (f::Optimistic)(y::T)
 end
 =#
 
+function random_discrete_homeo(j::Junction, thickness::Int, roundmode::RoundMode)
+    left_heights = Rational{Int}[i//(thickness * j.left_len) for i in 0:j.left_len * thickness]
+    right_heights = Rational{Int}[i//(thickness * j.right_len) for i in 0:j.right_len * thickness]
 
-function (f::Linear)(y::T)
-	@assert 0 <= y <= 1
-	return y
+    leftind=1
+    rightind=1
+    ordering=Dir[BOTH]
+    while leftind < length(left_heights) || rightind < length(right_heights)
+        if rightind == length(right_heights)
+            push!(ordering, LEFT)
+            leftind +=1
+        elseif leftind == length(left_heights)
+            push!(ordering, RIGHT)
+            rightind += 1
+        else
+            if rand() <= 0.3333
+                push!(ordering, BOTH)
+                leftind += 1
+                rightind += 1
+            elseif rand() <= 0.5
+                push!(ordering, LEFT)
+                leftind += 1
+            else
+                push!(ordering, RIGHT)
+                rightind+=1
+            end
+        end
+    end
+    push!(ordering, BOTH)
+    return DiscreteHomeo(left_heights, right_heights, ordering, LEFT, roundmode)
 end
+
+function test_discrete_homeo()
+    thickness=5
+    left_heights = Rational{Int}[i//(thickness) for i in 0:thickness]
+    right_heights = Rational{Int}[i//(thickness) for i in 0:thickness]
+    ordering = shuffle(vcat(Dir[LEFT for i in 1:length(left_heights)-2], Dir[RIGHT for i in 1:length(right_heights)-2]))
+    @show left_heights
+    @show right_heights
+    @show ordering
+    f = DiscreteHomeo(left_heights, right_heights, ordering, LEFT, UP)
+
+    @show [f(r) for r in left_heights]
+end
+
 
 function cwise((fnum,edge_index)::Tuple{Int,Int}, coor::Int)
 	(fnum,mod(edge_index-coor,3))
@@ -332,7 +314,7 @@ function Base.hash(J::Junction, h::UInt)
 end
 
 
-struct State
+struct State{T}
 	x::T#height in the edge
 	e::Track#which track we're on
 end
@@ -341,89 +323,25 @@ function inv(e::Junction)
 	return Junction(e.index,!e.inv,e.right_len,e.left_len)
 end
 
-
-
-function prunings(c::Candidate)
-	ch = Channel{Candidate}(3)
-	D=Dict{Junction, Union{Piecewise,Linear}}()
-	for J in c.bt.junctions
-		D[J] = c[J]
-	end
-	@async begin
-		for J in c.bt.junctions
-			for p in prunings(D[J])
-				if complexity(p) < complexity(D[J])
-					cnew=Candidate(c.bt,Dict{Junction,Union{Piecewise,Linear}}())
-					for _J in c.bt.junctions
-						cnew[_J]=c[_J]
-					end
-					cnew[J]=p
-					put!(ch, cnew)
-				end
-			end
-		end
-		close(ch)
-	end
-	return ch
-end
-
-function complexity(c::Candidate)
-	return sum(complexity(c[J]) for J in c.bt.junctions)
-end
-
-function prune(c::Candidate)
-	val = approximant_all_slopes(c)
-	old_complexity = complexity(c)
-
-	@label here
-	for cnew in prunings(c)
-		if approximant_all_slopes(cnew,time=10000) == val
-			c=cnew
-			@goto here
-		end
-	end
-
-	@show (old_complexity, complexity(c))
-	return c
-end
-
-function prune(E::Envelope{S}) where {S}
-    E2 = Envelope{S}(copy(E.A))
-    prune!(E2)
-    return E2
-end
-
-function prune!(E::Envelope)
-	@threads for i in eachindex(E.A)
-		val,c = E.A[i]
-		E.A[i] = (val, prune(c))
-	end
-    return E
-end
-
-function getindex(c::Candidate, J::Junction)
-	if J.inv && !haskey(c.d, J)
-		c.d[J] = inv(c[inv(J)])
-	end
-	return c.d[J]
-end
-function getindex(c::MCandidate, J::Junction)
-	return c.d[J]
-end
 function getindex(c::Cand, J::Junction)
 	return c.d[J]
 end
 
-function setindex!(c::Union{Candidate,MCandidate}, f::Union{Piecewise,Linear}, J::Junction)
+function setindex!(c::Cand{H}, f::H, J::Junction) where {H}
 	c.d[J] = f
 	c.d[inv(J)] = inv(f)
 end
 
-function (c::Union{Candidate,MCandidate})(J::Junction,x)
+function (c::Cand)(J::Junction, x::Rational)
 	@assert 0 <= x <= J.left_len
-	return c[J](x/J.left_len) * J.right_len
+	return c[J](x // J.left_len) * J.right_len
+end
+function (c::Cand)(J::Junction, x)
+	@assert 0 <= x <= J.left_len
+	return c[J](x / J.left_len) * J.right_len
 end
 
+#=
 function jiggle(c::Candidate, r::T)
 	cnew=Candidate(c.bt,Dict{Junction,Union{Piecewise,Linear}}())
 	for J in c.bt.junctions
@@ -450,6 +368,7 @@ end
 function jiggle(x::Linear, r::T)
 	Linear()
 end
+=#
 
 function print_junction(bt::BoundaryTriangulation, J::Junction)
 	println("Junction")
@@ -463,178 +382,68 @@ end
 
 #junction_crossings=Dict()
 
-function trace_forwards(s::State, bt::BoundaryTriangulation, c::Union{Candidate,MCandidate})
+function trace_forwards(s::State{T}, bt::BoundaryTriangulation, c::Cand) where {T}
+    #@show s.x
+    #@show s.e
 	@assert 0<= s.x <=1
 	i,J = bt.forward[s.e]
 	
-	#print_junction(bt,J)
+#	print_junction(bt,J)
 	fx = c(J,i+s.x)
+    #@show fx
 
 
 	j=Int(floor(fx))
 	#@show j
 	
-	#=
-	if !haskey(junction_crossings, J)
-		junction_crossings[J]=Set()
-	end
-	push!(junction_crossings[J], (i,j))
-	=#
 	if j==J.right_len
-		@assert fx - j < 0.00000001
-		println("hold your horses")
-        @show s
 		fx = T(j)
 		j=j-1
 	end
-	#=
-	if !haskey(bt.backwardfan, (j,J))
-		@show s
-		@show j
-		@show fx
-		@show keys(bt.backwardfan)
-		@show J.right_len
-	end
-	=#
 
-	return State(fx-j, bt.backwardfan[(j,J)])
+    #println("next\n\n")
+
+    return State{T}(fx-j, bt.backwardfan[(j,J)])
 end
 
+#=
 function trace_backwards(s::State, bt::BoundaryTriangulation, c::Candidate)
 	i,J = bt.backward[s.e]
 	fx = c(inv(J), i+s.x)
 	j=Int(floor(fx))
 	return State(fx-Int(floor(fx)), bt.forwardfan[(j,J)])
 end
-
-function random_piecewise(depth)
-	if depth<=0
-		Linear()
-	else
-		Piecewise(random_piecewise(depth-1), random_piecewise(depth-1), uniform(0.01,0.99), uniform(0.01,0.99))
-	end
-end
-
-function subdivide(p::Piecewise)
-	return Piecewise(subdivide(p.left), subdivide(p.right), p.x, p.fx)
-end
-function subdivide(p::Linear)
-	return Piecewise(Linear(), Linear(), 0.5, 0.5)
-end
-function subdivide(c::Candidate)
-	return Candidate(c.bt, Dict{Junction, Union{Piecewise,Linear}}(x=>subdivide(y) for (x,y) in c.d))
-end
-
-function piecewise(inputs::Vector, outputs::Vector)
-	@assert length(inputs)==length(outputs)
-	for x in inputs
-		@assert 0 <= x <= 1
-	end
-	for x in outputs 
-		@assert 0 <= x <= 1
-	end
-	@assert inputs == sort(inputs)
-	@assert outputs == sort(outputs)
-
-	if length(inputs)==0
-		return Linear()
-	else
-		i = round(Int,ceil(length(inputs)/2))
-		ret = Piecewise(piecewise(inputs[1:i-1] ./ inputs[i], outputs[1:i-1] ./ outputs[i]),
-						 piecewise((inputs[i+1:end] .- inputs[i]) ./ (1-inputs[i]), (outputs[i+1:end] .- outputs[i]) ./ (1-outputs[i])),
-						 inputs[i],
-						 outputs[i])
-		for (i,j) in zip(inputs, outputs)
-			@assert abs(j-ret(i))<0.0001
-		end
-		return ret
-	end
-end
-
-function random_candidate(bt,depth)
-	c=Candidate(bt, Dict{Junction, Union{Linear,Piecewise}}())
-	for j in bt.junctions
-		#@show depth + round(Int, log2(j.left_len + j.right_len))
-		c.d[j]=random_piecewise(depth + round(Int, log2(j.left_len + j.right_len)))
-	end
-	return c
-end
-
-function random_cand(bt, thickness)
-    d=Dict{Junction, DiscreteHomeo}()
-    for j in bt.junctions
-        d[j] = random_discrete_homeo(j, thickness)
-        d[inv(j)] = inv(d[j])
-    end
-
-    return Cand(bt, ArrayDict{Junction,DiscreteHomeo}(d))
-end
-
-
-function uniform(x,y)
-	@assert y>=x
-	return rand()*(y-x) + x
-end
-
-
-function approximant(x, time) #return closest rational approximant, but as a float
-	if isnan(x) || isinf(x)
-		return x
-	elseif x < 0
-		-approximant(-x, time)
-	elseif abs(x) > 1
-		1/approximant(1/x, time)
-	else
-		T(rationalize(x; tol=10/time))
-	end
-end
-
-function approximant_all_slopes(c::Union{Candidate, MCandidate}; time=10000)
-	return T[approximant(x,time) for x in all_slopes(c; time=time)]
-end
-function all_slopes(c::Union{Candidate,MCandidate}; time=200)
-	return T[slope(c, i; time=time) for i in 1:length(c.bt.rungs)]
-end
-function all_uncertain_slopes(c::Union{Candidate,MCandidate}; time=200)
-	return Measurement{Float64}[uncertain_slope(c, i; time=time) for i in 1:length(c.bt.rungs)]
-end
-
-#=
-function all_LazySlopes(c::Candidate)
-	return [LazySlope(c, rung) for rung in c.bt.firstrungs]
-end
-
-
-mutable struct LazySlope
-	c::Candidate
-	weight::Vector{T}
-	s::State
-end
-
-function value(l::LazySlope)
-	return interval(l.weight[2]-1, l.weight[2]+1)/l.weight[1]
-end
-
-function LazySlope(c::Candidate, s=State(0.312423, (1,0)))
-	return LazySlope(c, T[0,0], s)
-end
-
-function compute_slope!(l::LazySlope; time=100)
-	while abs(l.weight[1]) + abs(l.weight[2]) < time
-		l.s=trace_forwards(l.s, c.bt, c)
-		l.weight .+= c.bt.weights[l.s.e]
-	end
-end
 =#
 
 
+function random_cand(bt, thickness, roundmode)
+    d=Dict{Junction, DiscreteHomeo}()
+    for j in bt.junctions
+        d[j] = random_discrete_homeo(j, thickness, roundmode)
+        d[inv(j)] = inv(d[j])
+    end
+
+    return Cand(bt, ArrayDict(d))
+end
+
+
+function slope(c::Cand; time=200)
+	return [slope(c, i; time=time) for i in 1:c.bt.ncusps]
+end
+function uncertain_slope(c::Cand; time=200)
+	return Measurement{Float64}[uncertain_slope(c, i; time=time) for i in 1:c.bt.ncusps]
+end
+function exact_slope(c::Cand)
+    return [slope(c, i; time=1000) for i in 1:c.bt.ncusps]
+end
+
 #workhorse slope function. Just tries to start tracing from a state
-function _slope(c::Union{Candidate,MCandidate}, s::State; time=200)
+function _slope(c::Cand, s::State; time=200)
 	#weight=T[0,0]
     W = c.bt.weights
     
-	w1=T(0)
-	w2=T(0)
+	w1=Float64(0)
+	w2=Float64(0)
 
 	#weight .+= c.bt.weights[s.e]
 	x=W[s.e]
@@ -661,9 +470,9 @@ function _slope(c::Union{Candidate,MCandidate}, s::State; time=200)
 	return (w1,w2)
 end
 
-function show_trace(c::Union{Candidate,MCandidate}; time=50)
+function show_trace(c::Cand{H}; time=50) where {H}
     for j in 1:2
-        s=State(RAND_REAL, c.bt.rungs[j][1][1])
+        s=State(rand_init(H), c.bt.rungs[j][1][1])
         @show s
         println("cusp $(j)")
         for i in 1:time
@@ -673,72 +482,29 @@ function show_trace(c::Union{Candidate,MCandidate}; time=50)
     end
 end
 
+rand_init(::Type{DiscreteHomeo}) = 0//1
+rand_init(::Type)=0.31432
 
-
-const RAND_REAL=0.312432
-function slope(c::Union{Candidate, MCandidate}, i::Int; time=200)
-	w1,w2 = _slope(c, State(RAND_REAL,  c.bt.rungs[i][1][1]), time=time)
+function slope(c::Cand{H}, i::Int; time=200) where {H}
+    w1,w2 = _slope(c, State(rand_init(H),  c.bt.rungs[i][1][1]), time=time)
 	if abs(w1)<=1
 		return NaN
-		for ladder in c.bt.rungs[i][2:end]
-			w1p,w2p = _slope(c, State(RAND_REAL, ladder[1]), time=time)
-			@assert w1p <= 1
-			if sign(w2p) != sign(w2)
-				return NaN
-			end
-		end
 	end
 	#@show w1,w2
 	return clip(w2/w1, CLIP)
 end
 
-function uncertain_slope(c::Union{Candidate, MCandidate}, i::Int; time=200)
-	w1,w2 = _slope(c, State(RAND_REAL, c.bt.rungs[i][1][1]), time=time)
+function uncertain_slope(c::Cand{H}, i::Int; time=200) where {H}
+    w1,w2 = _slope(c, State(rand_init(H), c.bt.rungs[i][1][1]), time=time)
 	if abs(w1)<=1
 		return NaN
-		for ladder in c.bt.rungs[i][2:end]
-			w1p,w2p = _slope(c, State(RAND_REAL, ladder[1]), time=time)
-			@assert w1p <= 1
-			if sign(w2p) != sign(w2)
-				return measurement(NaN)
-			end
-		end
 	end
 	return clip(measurement(w2,1)/w1, CLIP)
 end
 
-#=
-function uncertain_slope(c::Candidate; time=200, s=State(0.312423, (1,0)))
-	#weight=T[0,0]
-	w1=T(0)
-	w2=T(0)
-	#weight .+= c.bt.weights[s.e]
-	#somehow the above allocates, so we'll be more explicit
-	x=c.bt.weights[s.e]
-	w1+=x[1]
-	w2+=x[2]
-	while abs(w1) + abs(w2) < time
-		#println(s)	
-		s=trace_forwards(s, c.bt, c)
-		#weight .+= c.bt.weights[s.e]
-		x,y=c.bt.weights[s.e]
-		w1+=x
-		w2+=y
-		#println(weight)
-	end
-
-
-	#=
-	for i in 1:20
-		println(s)
-		s=trace_backwards(s, c.bt, c)
-		weight = weight + c.bt.weights[s.e]
-		println(weight)
-	end
-	=#
-	return clip(measurement(w2,1)/w1, CLIP)
+function exact_slope(c::Cand{H}, i::Int) where {H}
+    @assert false
 end
-=#
 
 function clip(x, bounds)
 	ret = max(min(x, bounds), -bounds)
@@ -747,35 +513,6 @@ function clip(x, bounds)
 	return ret
 end
 
-function Envelope{S}() where {S <: Comp}
-	return Envelope{S}(Tuple{Vector{T},Candidate}[], SpinLock())
-end
-
-function Envelope{S}(A::Vector) where {S<: Comp}
-	return Envelope{S}(A, SpinLock())
-end
-
-function Envelope()
-	return Envelope{Upper}()
-end
-
-function PEnvelope()
-	return Envelope{Eq}()
-end
-
-function strict_compare(x::Vector{T},y::Vector{T})
-	return all(x .<= y)
-end
-
-function comp(S::Type{Upper}, x, y)
-	return strict_compare(x, y)
-end
-function comp(S::Type{Lower}, x, y)
-	return strict_compare(y, x)
-end
-function comp(S::Type{Eq}, x, y)
-	return x==y
-end
 
 function hasnan(s)
 	ret = any(map(isnan,s))
@@ -785,38 +522,77 @@ function hasnan(s)
 	return ret
 end
 
-function inclosure(e::Envelope{S}, x::Vector{T}) where {S, T}
-    return any(comp(S, x, y[1]) for y in e.A)
-end
-
-function push!(e::Envelope{S}, x::Tuple{Vector{T},Candidate}) where {S}
-	lock(e.L) do
-		if !hasnan(x[1]) && !any(comp(S, x[1], y[1]) for y in e.A)
-			filter!(y->!comp(S,y[1],x[1]), e.A)
-			push!(e.A, x)
-		end
-	end
-end
-
-function push!(e::Envelope, e2::Envelope)
-	for i in e2.A
-		push!(e,i)
-	end
-end
-
-function push!(e::Envelope{S}, x::Tuple{Union{NTuple{N,R}, Vector{R}},Candidate}) where {S, N, R <: Real}
-	if !hasnan(x[1])
-		push!(e, (T[x[1]...], x[2]))
-	end
-end
-
-function push!(e::Envelope, x::Candidate)
-	push!(e, (approximant_all_slopes(x), x))
-end
-
 struct Longitude
 	bt::BoundaryTriangulation
 	weights::OffsetArray
+end
+
+includet("envelopes.jl")
+function push!(e::Envelope, x::Cand)
+	push!(e, (exact_slope(x), x))
+end
+
+function longitude_to_candidate(bt::BoundaryTriangulation, l)
+    d=Dict{Junction, DiscreteHomeo}()
+    for J in bt.junctions
+        #print_junction(bt, J)
+        corresponding_left_heights = Rational{Int}[]
+        corresponding_right_heights = Rational{Int}[]
+
+        for k in 0:J.left_len-1
+            tri_num, index = bt.forwardfan[(k,J)] :: Track
+            for j in 1:l[tri_num]
+                push!(corresponding_left_heights, (k + j//(l[tri_num]+1))// J.left_len)
+            end
+        end
+
+
+        for k in 0:J.right_len-1
+            tri_num, index = bt.backwardfan[(k,J)] :: Track
+            for j in 1:l[tri_num]
+                push!(corresponding_right_heights, (k + j//(l[tri_num]+1))// J.right_len)
+            end
+        end
+
+        @assert length(corresponding_left_heights) == length(corresponding_right_heights)
+
+        all_left_heights = sort(vcat(corresponding_left_heights, [i//J.left_len for i in 0:J.left_len]))
+        all_right_heights = sort(vcat(corresponding_right_heights, [i//J.right_len for i in 0:J.right_len]))
+
+        push!(corresponding_left_heights, 1//1)
+        push!(corresponding_right_heights, 1//1)
+
+        push!(corresponding_left_heights, 0//1)
+        push!(corresponding_right_heights, 0//1)
+
+        left_heights = Rational{Int}[]
+        right_heights = Rational{Int}[]
+        ordering = Dir[]
+        while length(all_left_heights) > 0 || length(all_right_heights) > 0
+            if !(all_left_heights[1] in corresponding_left_heights)
+                push!(left_heights, popfirst!(all_left_heights))
+                push!(ordering, LEFT)
+            elseif !(all_right_heights[1] in corresponding_right_heights)
+                 push!(right_heights, popfirst!(all_right_heights))
+                 push!(ordering, RIGHT)
+            else
+                push!(left_heights, popfirst!(all_left_heights))
+                push!(right_heights, popfirst!(all_right_heights))
+                push!(ordering, BOTH)
+            end
+        end
+        #=
+        @show left_heights, right_heights, ordering
+        @show J.left_len
+        @show J.right_len
+        =#
+
+        H = DiscreteHomeo(left_heights, right_heights, ordering, LEFT, DOWN)
+        d[J] = H
+        d[inv(J)] = inv(d[J])
+    end
+
+    return Cand(bt, ArrayDict(d))
 end
 
 function slopes(l::Longitude)
@@ -924,7 +700,7 @@ function Mannealing(f, initial, _jiggle, betastart, betafinish, nsteps; verbose=
 		end
 
 		if verbose && i%10000 == 0
-			@show (approximant_all_slopes(current))
+			@show (exact_slope(current))
 			@show (accept_count, reject_count) 
 			p=plot(1:length(vals), vals)
 			display(p)
@@ -933,6 +709,7 @@ function Mannealing(f, initial, _jiggle, betastart, betafinish, nsteps; verbose=
 	@show (accept_count, reject_count)
     return to_static(current)
 end
+
 function annealing(f, initial, jiggle, betastart, betafinish, nsteps; verbose=true, minacc = 100, maxacc = 5000)
 	#linear annealing on range betastart, betafinish
 	current = initial
@@ -985,7 +762,7 @@ function annealing(f, initial, jiggle, betastart, betafinish, nsteps; verbose=tr
 		end
 
 		if verbose && i%10000 == 0
-			@show (approximant_all_slopes(current))
+			@show (exact_slope(current))
 			@show (accept_count, reject_count) 
 			p=plot(1:length(vals), vals)
 			display(p)
@@ -1000,7 +777,7 @@ function try_improve(E::Envelope{S}; nsubdivide=0, iters=50000, time=1000, targe
 	accurate_E=Envelope{S}()
 	@threads for i in 1:length(E.A)
 		_,oldcand = E.A[i]
-		old_v = approximant_all_slopes(oldcand)
+		old_v = exact_slope(oldcand)
 
 		for j in 1:nsubdivide
 			oldcand = subdivide(oldcand)
@@ -1012,7 +789,7 @@ function try_improve(E::Envelope{S}; nsubdivide=0, iters=50000, time=1000, targe
 		end
 
 		@time newcand = Mannealing((c; acc=100)->objective(S, all_uncertain_slopes(c,time=acc), old_v, target), oldcand, c->jiggle(c,radius), beta, beta, iters; verbose=false, radius=radius)
-		new_v = approximant_all_slopes(newcand)
+		new_v = exact_slope(newcand)
         #@show old_v, new_v 
         print(old_v)
         print("->[")
@@ -1037,7 +814,7 @@ end
 
 length(e::Envelope) = length(e.A)
 
-function random_trials(bt; nsubdivide=3, ntrials=100000)
+function random_trials(bt; thickness=8, roundmode=DOWN, ntrials=100000)
 	E=PEnvelope()
 	#trials=[T[] for i in 1:N]
 
@@ -1045,12 +822,12 @@ function random_trials(bt; nsubdivide=3, ntrials=100000)
 	#inrange(x) = all(-5 < i < 5 for i in x)
 
 	@threads for i in 1:ntrials
-		c=random_candidate(bt,nsubdivide)
-		#trials[i] = all_slopes(c)
-		push!(E, (approximant_all_slopes(c, time=200),c))
+		c=random_cand(bt,thickness,roundmode)
+		#trials[i] = slope(c)
+		push!(E, (exact_slope(c),c))
 	end
 
-	@show [x[1] for x in E.A]
+	#@show [x[1] for x in E.A]
 	#vals = collect(filter(inrange, trials))
 
 	#accurate_E = try_improve(E)
@@ -1068,7 +845,7 @@ function extreme_candidates(bt)
 
 	@threads :greedy for tmp in Iterators.product(([Piecewise(Linear(),Linear(),0.01, 0.99), Piecewise(Linear(),Linear(),0.99, 0.01), Linear()] for i in 1:length(bt.junctions))...)
 		c=Candidate(bt, Dict{Junction, Union{Linear,Piecewise}}(j=>f for (j,f) in zip(bt.junctions,tmp)))
-		ss = approximant_all_slopes(c)
+		ss = exact_slope(c)
 		push!(Elower, (ss,c))
 		push!(Eupper, (ss,c))
 	end
@@ -1082,32 +859,6 @@ function scatter_envelope!(p, E::Envelope)
 	scatter!(p, [[x[i] for x in vals] for i in 1:length(vals[1])]..., markersize=2)
 end
 =#
-
-
-function longitude_to_candidate(bt, longitude)
-	d=Dict{Junction, Union{Piecewise,Linear}}()
-	for J in bt.junctions
-		inputs = []
-		outputs = []
-		for i in 0:J.left_len -1
-			track = bt.forwardfan[(i,J)]
-			n = round(Int,longitude[track[1]])
-			for k in 1:n
-				push!(inputs, i + k/(n+1))
-			end
-		end
-		for i in 0:J.right_len-1
-			track = bt.backwardfan[(i,J)]
-			n = round(Int,longitude[track[1]])
-			for k in 1:n
-				push!(outputs, i + k/(n+1))
-			end
-		end
-		@assert length(inputs)==length(outputs)
-		d[J] = piecewise(inputs./ J.left_len, outputs./J.right_len)
-	end
-	return Candidate(bt,d)
-end
 
 
 function inbounds(pt)
@@ -1345,7 +1096,7 @@ function compute_vertical_weights!(bt::BoundaryTriangulation)
 		@show loop
 		weights = intersection_weights(bt, loop)
 		for (k,v) in weights
-			bt.weights[k] = SVector{2,T}([bt.weights[k][1], v])
+			bt.weights[k] = SVector{2,Float64}([bt.weights[k][1], v])
 		end
 	end
 end
