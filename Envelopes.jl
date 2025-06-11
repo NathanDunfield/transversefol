@@ -1,3 +1,23 @@
+module Envelopes
+using Base.Threads
+using StaticArrays
+export Upper, Lower, Eq, Envelope
+import Base: inv, getindex, setindex!, hash, push!, length, copy, show
+
+abstract type Comp
+end
+
+struct Upper <: Comp
+end
+
+struct Lower <: Comp
+end
+
+struct Eq <: Comp
+end
+
+
+
 struct Envelope{S,T,D} #keep track of local maxes
     A::Vector{Tuple{Vector{T},D}}
 	L::SpinLock
@@ -11,12 +31,14 @@ function Envelope{S}(A::Vector{Tuple{Vector{T},D}}) where {S<: Comp, T, D}
 	return Envelope{S,T,D}(A, SpinLock())
 end
 
-function Envelope()
-    return Envelope{Upper,Float64,Cand{DiscreteHomeo}}()
-end
+length(e::Envelope) = length(e.A)
 
-function PEnvelope()
-    return Envelope{Eq,Float64,Cand{DiscreteHomeo}}()
+function hasnan(s)
+	ret = any(map(isnan,s))
+	if ret
+		#println("rejecting $(s)")
+	end
+	return ret
 end
 
 function strict_compare(x::Vector{T},y::Vector{S}) where {S,T}
@@ -142,4 +164,6 @@ function push!(e::Envelope{S,T,D}, _x::Tuple{Union{NTuple{N,R}, Vector{R}},D}) w
 			push!(e.A, x)
 		end
 	end
+end
+
 end

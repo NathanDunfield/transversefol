@@ -5,29 +5,14 @@ using Revise
 using Dates
 using Profile,PProf
 using VeeringCensus
-using JSON
-using Envelopes
 
-using Blink
-@eval AtomShell begin
-    function init(; debug = false)
-        electron() # Check path exists
-        p, dp = port(), port()
-        debug && inspector(dp)
-        dbg = debug ? "--debug=$dp" : []
-        proc = (debug ? run_rdr : run)(
-            `$(electron()) --no-sandbox $dbg $mainjs port $p`; wait=false)
-        conn = try_connect(ip"127.0.0.1", p)
-        shell = Electron(proc, conn)
-        initcbs(shell)
-        return shell
-    end
-end
 
 includet("search.jl")
 includet("find_surface.jl")
 includet("plotting.jl")
-includet("draw_bt.jl")
+includet("envelopes.jl")
+
+#include("batch/2cusp_manifest.txt")
 
 function mathematica_print(f::IO, l::Union{Array,Tuple})
 	print(f,"{")
@@ -66,14 +51,6 @@ function dump_points(isosig)
     end
 end
 
-function minchi(tup)
-    chi=-Inf
-	for l in tup.longitudes
-        chi = max(chi, normalizedchi(Longitude(tup.bt,l)))
-	end
-    return chi
-end
-
 function find_s2_longitudes(tup)
 	D=Set()
 
@@ -98,18 +75,17 @@ function find_s2_longitudes(tup)
     return collect(D)
 end
 
-function compute_longitudes(bt, fans, top_bot_pairs; nlongs=100)
+function compute_longitudes(bt; nlongs=100)
     Elong = PEnvelope()
 	long_dict = DefaultDict(()->[])
 	longitudes = []
 
     @show bt.rungs
 
+    compute_homology(fans, top_bot_pairs)
 
-    #can't remember what the next two lines are doing, so let's try to remove them
-    #compute_homology(fans, top_bot_pairs)
-    #hom_classes=[map(x->x[1], y[1]) for y in bt.rungs[1:end-1]]
-    #@show hom_classes
+    hom_classes=[map(x->x[1], y[1]) for y in bt.rungs[1:end-1]]
+    @show hom_classes
 
 	#ch = for l in find_longitudes_random(fans)
 	#ch = find_longitudes_iterative(fans,1000) 
@@ -131,7 +107,7 @@ function compute_longitudes(bt, fans, top_bot_pairs; nlongs=100)
 		ss = [y//x for (x,y) in slopes(Longitude(bt,l))]
 
 		if !haskey(long_dict, ss)
-			@show length(long_dict)+1
+			@show length(long_dict)
 			#flush(stdout)
 		end
 		push!(long_dict[ss], l)
@@ -158,13 +134,12 @@ function compute_longitudes(bt, fans, top_bot_pairs; nlongs=100)
 	return Elong, longitudes
 end
 
-function latest_save(filename)
-    CUTOFF = Dates.datetime2unix(Dates.DateTime(2025,06,11,02,38))
+function latest_save(isosig)
 	locations=[]
-    push!(locations, "/home/jonathan/Dropbox/jonathan/transversefol/batch/$(filename)")
-    push!(locations, "/home/jonathan/engaging_sshfs/transversefol/batch/$(filename)")
+	push!(locations, "/home/jonathan/Dropbox/jonathan/transversefol/batch/$(isosig).jls")
+	push!(locations, "/home/jonathan/engaging_sshfs/transversefol/batch/$(isosig).jls")
 
-    locations = sort(filter(f->mtime(f) > CUTOFF, filter(isfile, locations)), by=mtime)
+	locations = sort(filter(isfile, locations), by=mtime)
 	if length(locations)==0
 		println("not found")
         return nothing
@@ -175,95 +150,58 @@ function latest_save(filename)
 	end
 end
 
-function load(i::Int; kwargs...)
-    load(VeeringCensus.lookup(i); kwargs...)
-end
-function load(i::Int, ncusps::Int; kwargs...)
-    load(VeeringCensus.lookup(i,ncusps); kwargs...)
-end
-
-function loadstat(isosig::String; refresh=false)
-    path = latest_save("$(isosig)_stat.json")
-    if path==nothing || refresh
-        return Dict{String,Any}("isosig"=>isosig)
-    else
-        return JSON.parsefile(path)
-    end
-end
-
-function savestat(d::Dict)
-    open("batch/$(d["isosig"])_stat.json", "w") do io 
-        JSON.print(io, d)
-    end
-end
-
-function load(isosig::String; refresh=false, refresh_prep=false, nlongs=100)
+function load(isosig; refresh=false, nlongs=100)
 	println("setting up $(isosig), requesting $(nlongs) longitudes")
 	flush(stdout)
-    
-    path = latest_save("$(isosig).json")
-	if path==nothing || refresh_prep
-		println("batch/$(isosig).json not found, preparing it now")
+	if !isfile("batch/$(isosig).txt")
+		println("batch/$(isosig).txt not found, preparing it now")
 		flush(stdout)
-		run(`/home/jonathan/.py3env/bin/python3 prepare.py $(isosig)`)
+		run(`python3 prepare.py $(isosig)`)
 	end
 
+	include("batch/$(isosig).txt")
 
-    path = latest_save("$(isosig).jls")
+    path = latest_save(isosig)
 
-	if path == nothing || refresh || refresh_prep
-        _prep = Dict{Symbol,Any}(Symbol(key)=>eval(Meta.parse(value)) for (key,value) in JSON.parsefile("batch/$(isosig).json"))
-        _prep[:face_coorientations] = OffsetArrays.Origin(0)(_prep[:face_coorientations])
-
-        prep = NamedTuple(_prep)
-
-        bt=BoundaryTriangulation(prep.fans, prep.face_coorientations, prep.firstrungs, prep.alledges, prep.rungs)	
-
+	if path == nothing || refresh
+		bt=BoundaryTriangulation(fans, face_coorientations, firstrungs, alledges, rungs)	
 		ncusps = length(bt.firstrungs)
 
-
-        function filternan(A::Vector{T}) where {T}
-            tmp = collect(filter(x->!(any(isinf.(x[1]))), A))
-            return tmp
-        end
-
-
-		Elong, longitudes = compute_longitudes(bt, prep.fans, prep.top_bot_pairs; nlongs=nlongs)
-		Eupper = Envelope{Upper}(filternan(Elong.A))
-        Elower = Envelope{Lower}([(x,set_roundmode(c, UP)) for (x,c) in filternan(Elong.A)])
+		Elong, longitudes = compute_longitudes(bt; nlongs=nlongs)
+		Eupper = Envelope{Upper}(copy(Elong.A))
+        Elower = Envelope{Lower}([(x,set_roundmode(c, UP)) for (x,c) in Elong.A])
 
         #Eupper= Envelope{Upper,Float64,Cand{DiscreteHomeo}}()
         #Elower= Envelope{Lower,Float64,Cand{DiscreteHomeo}}()
 
 
-		tup = (bt=bt, Eupper=Eupper, Elower=Elower, Elong=Elong, longitudes=longitudes, isosig=isosig, prep = prep)
-        save(tup)
+		tup = (bt=bt, Eupper=Eupper, Elower=Elower, Elong=Elong, longitudes=longitudes)
+		serialize("batch/$(isosig).jls", tup)
 	else
-        tup = (deserialize(path)..., isosig=isosig)
-        #=
+		tup = deserialize(path)
 		if length(tup.longitudes) < nlongs
 			Elong, longitudes = compute_longitudes(tup.bt; nlongs=nlongs)
             for (x,c) in Elong.A
                 push!(tup.Eupper, (x,c))
                 push!(tup.Elower, (x,c))
             end
-			tup = (tup...,longitudes=longitudes)
-            save(tup)
+			tup = (bt=tup.bt, Eupper=tup.Eupper, Elower=tup.Elower, Elong=Elong, longitudes=longitudes)
+			serialize("batch/$(isosig).jls", tup)
 		end
-        =#
 	end
 	println("done setup")
 	flush(stdout)
 	return tup
 end
 
-function save(tup) #always save locally
-	serialize("batch/$(tup.isosig).jls", tup)
+function save(isosig, tup) #always save locally
+	serialize("batch/$(isosig).jls", tup)
 end
 
 function regimen(E::Envelope, target::Vector{T}; verbose=false) where {T<:Real}
 	#ncusps = length(E.A[1][1])
-		
+	
+	
 	println("phase 1")
 	E = try_improve(E; nsubdivide=0, iters=30000, time=1000, target=target, radius=0.001)
 	flush(stdout)
@@ -277,7 +215,7 @@ function regimen(E::Envelope, target::Vector{T}; verbose=false) where {T<:Real}
 		add_trace!(p, _plotjs(E))
 	end
 	println("phase 3")
-	E = try_improve(E; nsubdivide=1, iters=1000000, time=2000, target=target, radius=0.001, beta=1600)
+	#E = try_improve(E; nsubdivide=1, iters=1000000, time=2000, target=target, radius=0.001, beta=1600)
 	flush(stdout)
 	if isinteractive() && verbose
 		add_trace!(p, _plotjs(E))
@@ -286,17 +224,13 @@ function regimen(E::Envelope, target::Vector{T}; verbose=false) where {T<:Real}
 end
 
 function runjob(i::Int; kwargs...)
-    runjob(VeeringCensus.lookup(i); kwargs...)
+	include("batch/2cusp_manifest.txt")
+	isosig=isosigs[i]
+	runjob(isosig; index=i, kwargs...)
 end
 
-function runjob(i::Int, ncusps::Int; kwargs...)
-    runjob(VeeringCensus.lookup(i,ncusps); kwargs...)
-end
-
-function runjob(isosig::String; rt=0, ex=false, reg=false, nlongs=100, target=nothing, fromscratch=false, doprune=false, preprune=false, refresh=false, fix=false, verbose=false)
+function runjob(isosig::String; rt=0, ex=false, reg=false, nlongs=100, target=nothing, fromscratch=false, doprune=false, preprune=false, refresh=false, fix=false, verbose=false, index=0)
 	tup = load(isosig, nlongs=nlongs, refresh=refresh)
-    println("running $(tup.isosig)")
-    index = VeeringCensus.index(isosig)
     #=
 	global p=quickview(tup; isosig=isosig)
 	if isinteractive() && verbose
@@ -317,9 +251,9 @@ function runjob(isosig::String; rt=0, ex=false, reg=false, nlongs=100, target=no
 
 	if reg
 		Eupper = regimen(Eupper, [CLIP for i in 1:ncusps]; verbose=verbose)
-        save((tup..., Eupper=Eupper, Elower=Elower))
+        serialize("batch/$(isosig).jls", (bt=tup.bt, Eupper=Eupper, Elower=Elower, Elong=tup.Elong, longitudes=tup.longitudes))
         Elower = regimen(Elower, [-CLIP for i in 1:ncusps]; verbose=verbose)
-        save((tup..., Eupper=Eupper, Elower=Elower))
+        serialize("batch/$(isosig).jls", (bt=tup.bt, Eupper=Eupper, Elower=Elower, Elong=tup.Elong, longitudes=tup.longitudes))
 	end
 
     if target == :gaps
@@ -356,7 +290,7 @@ function runjob(isosig::String; rt=0, ex=false, reg=false, nlongs=100, target=no
                 end
                 lock(Eupper.L) do
                     lock(Elower.L) do
-                        save((tup..., Eupper=Eupper, Elower=Elower))
+                        serialize("batch/$(isosig).jls", (bt=tup.bt, Eupper=Eupper, Elower=Elower, Elong=tup.Elong, longitudes=tup.longitudes))
                     end
                 end
             end
@@ -370,13 +304,12 @@ function runjob(isosig::String; rt=0, ex=false, reg=false, nlongs=100, target=no
                 end
                 lock(Eupper.L) do
                     lock(Elower.L) do
-                        save((tup..., Eupper=Eupper, Elower=Elower))
+                        serialize("batch/$(isosig).jls", (bt=tup.bt, Eupper=Eupper, Elower=Elower, Elong=tup.Elong, longitudes=tup.longitudes))
                     end
                 end
             end
         end
-        save((tup..., Eupper=Eupper, Elower=Elower))
-
+        serialize("batch/$(isosig).jls", (bt=tup.bt, Eupper=Eupper, Elower=Elower, Elong=tup.Elong, longitudes=tup.longitudes))
     elseif target != nothing
 		Etmp = regimen(Envelope{Upper}(copy(
 											if fromscratch
@@ -409,12 +342,12 @@ function runjob(isosig::String; rt=0, ex=false, reg=false, nlongs=100, target=no
             push!(Eupper, (x,c))
 		end
 
-		randE = random_trials(tup.bt,ntrials=rt,thickness=24, roundmode=UP)
+		randE = random_trials(tup.bt,ntrials=rt,thickness=16, roundmode=UP)
 		@threads for (x,c) in randE.A
-            push!(Elower, (x,c))
+            #push!(Elower, (x,c))
         end
 
-        save((tup..., Eupper=Eupper, Elower=Elower))
+        serialize("batch/$(isosig).jls", (bt=tup.bt, Eupper=Eupper, Elower=Elower, Elong=tup.Elong, longitudes=tup.longitudes))
 	end
 
 	if doprune
@@ -422,13 +355,13 @@ function runjob(isosig::String; rt=0, ex=false, reg=false, nlongs=100, target=no
 		prune!(Elower)
 	end
 
-	p=quickview((tup..., Eupper=Eupper, Elower=Elower))
+	p=quickview((bt=tup.bt, Eupper=Eupper, Elower=Elower, Elong=tup.Elong, longitudes=tup.longitudes); isosig=isosig, index=index)
 	if isinteractive() && verbose
 		display(p)
 	end
     PlotlyJS.savefig(p, "batch/$(isosig).html")
     PlotlyJS.savefig(p, "batch/$(index).html")
-    save((tup..., Eupper=Eupper, Elower=Elower))
+	serialize("batch/$(isosig).jls", (bt=tup.bt, Eupper=Eupper, Elower=Elower, Elong=tup.Elong, longitudes=tup.longitudes))
     println("done job")
 	flush(stdout)
 end
@@ -449,23 +382,23 @@ function bench()
 end
 
 function viewladderpole(i::Int)
-    run(`evince batch/$(VeeringCensus.lookup(i)).pdf`)
-end
-
-function viewladderpole(i::Int, ncusps::Int)
-    run(`evince batch/$(VeeringCensus.lookup(i,ncusps)).pdf`)
-end
-
-function quickview(i::Int, ncusps::Int)
-    quickview(VeeringCensus.lookup(i,ncusps))
+    include("batch/2cusp_manifest.txt")
+    run(`evince batch/$(isosigs[i]).pdf`)
 end
 
 function quickview(i::Int)
-    quickview(VeeringCensus.lookup(i))
+	#try
+		include("batch/2cusp_manifest.txt")
+		isosig=isosigs[i]
+		quickview(isosig; index=i)
+	#catch e
+	#	@show e
+	#end
 end
 
-function quickview(isosig::String)
-	quickview(load(isosig))
+
+function quickview(isosig::String; index=0)
+	quickview(load(isosig); isosig=isosig, index=index)
 end
 
 #=
@@ -508,9 +441,8 @@ function constr_dict()
 end
 =#
 
-function obstructions(tup::NamedTuple)
-    isosig = tup.isosig
-	#include("batch/$(isosig).txt")
+function obstructions(tup::NamedTuple; isosig="")
+	include("batch/$(isosig).txt")
 
     bt=tup.bt
 
@@ -532,7 +464,7 @@ function obstructions(tup::NamedTuple)
         #b2=bound(tup.Elower, sss[1])
         push!(long_slopes, sss)
 
-        if is_fiber(l,tup.prep.top_bot_pairs)
+        if is_fiber(l,top_bot_pairs)
             #@assert connected_components(l,fans)==1
             for (s,info) in constraints(L)
                 if all(!isnan(x) for x in s) && all(!isinf(x) for x in s) && info.npunc==1# && info.interior_prong >= 2
@@ -582,11 +514,8 @@ function obstructions(tup::NamedTuple)
     return Econstr_lower, Econstr_upper
 end
 
-function quickview(tup::NamedTuple)
-    isosig = tup.isosig
-    index = VeeringCensus.index(isosig)
-
-    #include("batch/$(isosig).txt")
+function quickview(tup::NamedTuple; isosig="", index=0)
+    include("batch/$(isosig).txt")
 	Eupper = tup.Eupper
 	Elower = tup.Elower
 
@@ -606,7 +535,7 @@ function quickview(tup::NamedTuple)
 
 
 	bt = tup.bt
-    ncusps=bt.ncusps
+	ncusps = length(bt.firstrungs)
 
     function namedtuple(slopes)
         @assert length(slopes)==ncusps
@@ -647,7 +576,7 @@ function quickview(tup::NamedTuple)
         push!(long_slopes, sss)
         push!(longitudeDF, (ss=slopes(L), l=l,  namedtuple(sss)..., text=string((normchi=normalizedchi(L),ss=ss,weights=l)), nchi = normalizedchi(L)))
 
-        if is_fiber(l,tup.prep.top_bot_pairs)
+        if is_fiber(l,top_bot_pairs)
             #@assert connected_components(l,fans)==1
             for (s,info) in constraints(L)
                 if all(!isnan(x) for x in s) && all(!isinf(x) for x in s) && info.npunc==1# && info.interior_prong >= 2
@@ -692,7 +621,7 @@ function quickview(tup::NamedTuple)
     axes = if ncusps == 1
         (
         xaxis=attr(
-            showticklabels=true,
+            showticklabels=false,
             range=trimmed_ranges[1]
         ),
         yaxis=attr(
@@ -729,9 +658,7 @@ function quickview(tup::NamedTuple)
 
     end
 
-    data = VeeringCensus.lookup_row(index)
-
-    layout = Layout(title="#$(index)   $(data[:isosig])   $(data[:depth])    $(data[:names])"; axes..., legend=attr(font=attr(
+    layout = Layout(title="#$(index)   $(isosig)"; axes..., legend=attr(font=attr(
       size= 16)))
 
     p=PlotlyJS.plot(layout)
@@ -741,9 +668,7 @@ function quickview(tup::NamedTuple)
 
     #addtraces!(p, _plotjs(Envelope{Lower,Float64,Cand{DiscreteHomeo}}([([-CLIP for i in 1:ncusps],dummy_candidate)]), Eupper, color=POS_CONTACT_COLOUR, name="positive contact structures")...)
 
-    if length(Elower.A) > 0 && length(Eupper.A) > 0
-        addtraces!(p, _plotjs(Elower, Eupper, name="Z (foliated region)")...)
-    end
+    addtraces!(p, _plotjs(Elower, Eupper, name="Z (foliated region)")...)
 
     if length(Econstr_lower.A) > 0
         addtraces!(p, _plotjs(Econstr_lower, Envelope{Upper}([([CLIP for i in 1:ncusps], nothing)]), color=OBSTRUCTION_COLOUR, name="obstructions")...)
@@ -758,14 +683,10 @@ function quickview(tup::NamedTuple)
         return subset(df, :x => x->abs.(x).<=CLIP, :y => y->abs.(y).<=CLIP)
     end
 
-    if length(tup.Elong.A) > 0
 
-        #add_trace!(p, _plotjs(tup.Elong, color=LONGITUDE_COLOUR))
-        add_trace!(p, PlotlyJS.scatter(clip_df(longitudeDF); plotting_directives()..., marker=attr(line=attr(width=0), size=(ncusps<=2 ? 25 : 10) ./ log.(4 .- longitudeDF[!,:nchi]), color=LONGITUDE_COLOUR), text=:text, mode="markers", name="fibrations"))
-        add_trace!(p, PlotlyJS.scatter(clip_df(constrDF); plotting_directives()..., marker=attr(color=OBSTRUCTION_COLOUR, size=(ncusps<=2 ? 5 : 3)), text=:text, mode="markers", name="obstructions")) 
-    else
-        println("no longitudes")
-    end
+    #add_trace!(p, _plotjs(tup.Elong, color=LONGITUDE_COLOUR))
+    add_trace!(p, PlotlyJS.scatter(clip_df(longitudeDF); plotting_directives()..., marker=attr(line=attr(width=0), size=(ncusps<=2 ? 25 : 10) ./ log.(4 .- longitudeDF[!,:nchi]), color=LONGITUDE_COLOUR), text=:text, mode="markers", name="fibrations"))
+    add_trace!(p, PlotlyJS.scatter(clip_df(constrDF); plotting_directives()..., marker=attr(color=OBSTRUCTION_COLOUR, size=(ncusps<=2 ? 5 : 3)), text=:text, mode="markers", name="obstructions")) 
 
 
 
@@ -795,35 +716,25 @@ function quickview(tup::NamedTuple)
     end
 
 	PlotlyJS.savefig(p, "batch/$(index).html")
+	#serialize("batch/$(isosig).jls", (bt=bt, Eupper=Eupper, Elower=Elower, Elong=Elong))
 	flush(stdout)
 
     on(p["click"]) do data
-        @show data
+        #println(data)
         for point in data["points"]
-            @show point
-            if ncusps == 1
-                coords = [point["x"]]
-            elseif ncusps == 2
-                coords = [point["x"],point["y"]]
-            elseif ncusps == 3
-                coords = [point["x"],point["y"],point["z"]]
-            end
-
-            println(rationalize.(coords))
+            x=point["x"]
+            y=point["y"]
+            println((rationalize(x), rationalize(y)))
 
             for (s,cand) in Iterators.flatten([tup.Elong.A, tup.Eupper.A, tup.Elower.A])
-                if s == coords
-                    global lastcand = cand
-                    for i in 1:ncusps
-                        draw(cand,i) |> display
-                    end
-                    break
+                if s == [x,y]
+                    println(cand)
                 end
             end
         end
-    end
 
-    return p
+    end
+	p
 
 	#interesting example isosigs[63]
 end
@@ -933,38 +844,6 @@ function flagbad(range)
 
     end
 
-end
-
-function computestat(isosig::String, f; name=String(Symbol(f)))
-    d=loadstat(isosig)
-    d[name] = f(load(isosig))
-    savestat(d)
-end
-
-function computestat(indices::Union{AbstractVector{Int},AbstractRange{Int}}, f; name=String(Symbol(f)))
-    @threads for ind in indices
-        computestat(VeeringCensus.lookup(ind), f)
-    end
-end
-function computestat(indices::Union{AbstractVector{Int},AbstractRange{Int}},ncusps::Int, f; name=String(Symbol(f)))
-    @threads for ind in indices
-        computestat(VeeringCensus.lookup(ind, ncusps), f)
-    end
-end
-
-function reapstat(indices)
-    df = DataFrame()
-    for i in indices
-        push!(df, loadstat(VeeringCensus.lookup(i)), cols=:union)
-    end
-    return df
-end
-function reapstat(indices, ncusps::Int)
-    df = DataFrame()
-    for i in indices
-        push!(df, loadstat(VeeringCensus.lookup(i,ncusps)), cols=:union)
-    end
-    return df
 end
 
 function run_profile()

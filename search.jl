@@ -1,5 +1,5 @@
 using OffsetArrays
-import Base: inv, getindex, setindex!, hash, push!, length, copy
+import Base: inv, getindex, setindex!, hash, push!, length, copy, show
 using DataStructures
 using Profile
 #using ProfileView
@@ -7,18 +7,14 @@ using Base.Threads
 using Measurements
 using StaticArrays
 using LinearAlgebra
+using Envelopes
+import Envelopes: Envelope
 #import Plots: plot
+
+includet("Homeos.jl")
 
 const CLIP = 25 #don't worry about any slopes of absolute value bigger than CLIP
 
-abstract type Homeo end
-#represents a piecewise linear function from [0,1] to [0,1]
-#
-#=
-#really, the identity function
-struct Linear <: Homeo
-end
-=#
 
 
 const Track = Tuple{Int,Int} #edge index and vertex number
@@ -27,101 +23,14 @@ const MultiSlope{N} = SVector{N,Slope} where N #todo: make all vector of slopes 
 
 #make this mutable, so that we can do simulated annealing by updating the same struct over and over again.
 
-@enum Dir LEFT=1 RIGHT=2 BOTH=3 #idea: make BOTH take up two slots. Then we never need to change the length of the array.
-@enum RoundMode DOWN=1 UP=2
-struct DiscreteHomeo <: Homeo #todo: precompute the output heights
-    left_heights::Vector{Rational{Int}} #sorted list of heights on the left
-    right_heights::Vector{Rational{Int}} #sorted list of heights on the right
-    ordering::Vector{Dir} #ordering of the left_heights and right_heights. We should have ordering[1] == ordering[end]==BOTH
-    dir::Dir
-    roundmode::RoundMode
+
+function Envelope()
+    return Envelope{Upper,Float64,Cand{DiscreteHomeo}}()
 end
 
-function inv(d::DiscreteHomeo) #uses the same underlying array
-    return DiscreteHomeo(d.right_heights, d.left_heights, d.ordering, inv(d.dir), d.roundmode)
+function PEnvelope()
+    return Envelope{Eq,Float64,Cand{DiscreteHomeo}}()
 end
-
-function inv(d::Dir)
-    if d == LEFT
-        return RIGHT
-    elseif d==RIGHT
-        return LEFT
-    else
-        @assert d==BOTH
-        return BOTH
-    end
-end
-
-function (f::DiscreteHomeo)(r::Rational{Int})
-    verbose =  false #rand() < 0.01
-
-    index_range = searchsorted(f.left_heights, r)
-    if length(index_range) != 1
-        @show f
-        @show r
-    end
-    @assert length(index_range)==1
-
-    index = index_range.stop
-
-    if f.roundmode == DOWN
-        curr_leftindex = 0
-        curr_rightindex = 0
-
-        for k in 1:length(f.ordering)
-            if f.ordering[k] == f.dir
-                curr_leftindex += 1
-            elseif f.ordering[k] == inv(f.dir)
-                curr_rightindex += 1
-            else 
-                @assert f.ordering[k] == BOTH
-                curr_leftindex += 1
-                curr_rightindex += 1
-            end
-            if curr_leftindex == index
-                return f.right_heights[curr_rightindex]
-            end
-        end
-    elseif f.roundmode == UP
-        curr_leftindex = length(f.left_heights)+1
-        curr_rightindex = length(f.right_heights)+1
-
-        for k in length(f.ordering):-1:1
-            if f.ordering[k] == f.dir
-                curr_leftindex -= 1
-            elseif f.ordering[k] == inv(f.dir)
-                curr_rightindex -= 1
-            else
-                @assert f.ordering[k] == BOTH
-                curr_leftindex-=1
-                curr_rightindex-=1
-            end
-            if curr_leftindex == index
-                return f.right_heights[curr_rightindex]
-            end
-        end
-    end 
-    @show f.roundmode
-    @show f.ordering
-    @show curr_leftindex
-    @show curr_rightindex
-    @assert false
-end
-
-
-abstract type Comp
-end
-
-struct Upper <: Comp
-end
-
-struct Lower <: Comp
-end
-
-struct Eq <: Comp
-end
-
-
 struct Junction
 	index::Int
 	inv::Bool
@@ -129,7 +38,7 @@ struct Junction
 	right_len::Int
 end
 
-cartesianlength(::Type{Junction}) = 2
+cartesianlength(::Type{Junction}) = 2 #cartesianlength tells the length of a type, as a tuple of ints, for the purposes of indexing.
 cartesianlength(::Type{Tuple{S,T}}) where {S,T} = cartesianlength(S) + cartesianlength(T)
 cartesianlength(::Type{Int}) = 1
 tupleIndex(J::Junction) = (J.index+1, Int(J.inv)+1)
@@ -238,9 +147,25 @@ struct BoundaryTriangulation
 	end
 end
 
+
 struct Cand{S<:Homeo} #should it be mutable?
     bt::BoundaryTriangulation
     d::ArrayDict{Junction, S, 2}
+end
+
+function right_tracks(bt::BoundaryTriangulation, J::Junction)
+    return (bt.backwardfan[(i,J)] for i in 0:J.right_len-1)
+
+end
+
+function left_tracks(bt::BoundaryTriangulation, J::Junction)
+    return (bt.forwardfan[(i,J)] for i in 0:J.left_len-1)
+end
+
+function show(io::IO, c::Cand)
+    println(io, "Cand")
+    println(io, "exact slope: $(exact_slope(c))")
+    println(io, "rung percentage: $(rung_percentage(c))")
 end
 
 #=
@@ -276,27 +201,6 @@ function random_ordering(left_heights, right_heights)
 
         return vcat(random_ordering(left_heights[1:k1], right_heights[1:k2])[1:end-1], random_ordering(left_heights[k1:end], right_heights[k2:end]))
     end
-end
-
-function random_discrete_homeo(j::Junction, thickness::Int, roundmode::RoundMode)
-    left_heights = Rational{Int}[i//(thickness * j.left_len) for i in 0:j.left_len * thickness]
-    right_heights = Rational{Int}[i//(thickness * j.right_len) for i in 0:j.right_len * thickness]
-
-    ordering = random_ordering(left_heights, right_heights)
-    return DiscreteHomeo(left_heights, right_heights, ordering, LEFT, roundmode)
-end
-
-function test_discrete_homeo()
-    thickness=5
-    left_heights = Rational{Int}[i//(thickness) for i in 0:thickness]
-    right_heights = Rational{Int}[i//(thickness) for i in 0:thickness]
-    ordering = shuffle(vcat(Dir[LEFT for i in 1:length(left_heights)-2], Dir[RIGHT for i in 1:length(right_heights)-2]))
-    @show left_heights
-    @show right_heights
-    @show ordering
-    f = DiscreteHomeo(left_heights, right_heights, ordering, LEFT, UP)
-
-    @show [f(r) for r in left_heights]
 end
 
 
@@ -506,6 +410,13 @@ function random_cand(bt, thickness, roundmode)
     return Cand(bt, ArrayDict(d))
 end
 
+function random_discrete_homeo(j::Junction, thickness::Int, roundmode::RoundMode)
+    left_heights = Rational{Int}[i//(thickness * j.left_len) for i in 0:j.left_len * thickness]
+    right_heights = Rational{Int}[i//(thickness * j.right_len) for i in 0:j.right_len * thickness]
+
+    ordering = random_ordering(left_heights, right_heights)
+    return DiscreteHomeo(left_heights, right_heights, ordering, LEFT, roundmode)
+end
 function rung_percentage(c::Cand; time=500)
     return [rung_percentage(c,i; time=time) for i in 1:c.bt.ncusps]
 end
@@ -574,6 +485,7 @@ function rung_percentage(c::Cand{H}, j::Int; time=500) where {H}
     rungs = Set(Iterators.flatten(c.bt.rungs[j]))
     
     sequence = Bool[]
+    s=State(rand_init(H), c.bt.rungs[j][1][1])
     for i in 1:time
         s=trace_forwards(s,c)
         push!(sequence, s.e in rungs)
@@ -643,7 +555,6 @@ struct Longitude
 	weights::OffsetArray
 end
 
-includet("envelopes.jl")
 function push!(e::Envelope, x::Cand)
 	push!(e, (exact_slope(x), x))
 end
@@ -949,7 +860,6 @@ function try_improve(E::Envelope{S,T,D}; nsubdivide=0, iters=50000, time=1000, t
 	return accurate_E
 end
 
-length(e::Envelope) = length(e.A)
 
 function random_trials(bt; thickness=8, roundmode=DOWN, ntrials=100000)
 	E=PEnvelope()
@@ -1079,7 +989,7 @@ function constraints(L::Longitude)
     @assert s>=0
     =#
 
-    nladders = map(x->length(x)//2, rungs)
+    nladders = map(x->length(x)//2, L.bt.rungs)
 
     #prongcounts = (q*nladders[1]//gcd(p,q), s*nladders[2]//gcd(r,s))
 
@@ -1211,6 +1121,77 @@ function intersection_weights(bt::BoundaryTriangulation, loop::Vector{Track})
 	end
 	return weights
 end
+
+function ladderpoles(bt::BoundaryTriangulation)
+    return [ladderpoles(bt,i) for i in 1:bt.ncusps]
+end
+
+function ladderpoles(bt::BoundaryTriangulation, i::Int)
+    return [ 
+    begin
+        _,J=bt.backward[rungs[1]]
+        f(bt,J)
+    end
+
+    for (rungs,f) in zip(bt.rungs[i], Iterators.cycle((upward_ladderpole, downward_ladderpole)))]
+end
+
+function upward_ladderpole(bt::BoundaryTriangulation, J::Junction)
+    tracks = Track[]
+    currJ = J
+
+    while true
+        curr_edge = bt.backwardfan[(currJ.right_len-1,currJ)]
+        push!(tracks, curr_edge)
+        _,currJ = bt.forward[curr_edge]
+
+        if currJ == J
+            return tracks
+        end
+    end
+end
+
+function downward_ladderpole(bt::BoundaryTriangulation, J::Junction)
+    tracks = Track[]
+    currJ = J
+
+    while true
+        curr_edge = bt.forwardfan[(currJ.left_len-1,currJ)]
+        push!(tracks, curr_edge)
+        _,currJ = bt.backward[curr_edge]
+
+        if currJ == J
+            return tracks
+        end
+    end
+end
+
+
+function trace_forwards(s::State{T}, c::Cand) where {T}
+    #@show s.x
+    #@show s.e
+	@assert 0<= s.x <=1
+	i,J = c.bt.forward[s.e]
+	
+#	print_junction(bt,J)
+    fx = c(J,i+s.x)
+    #@show fx
+
+
+    j=Int(floor(fx))
+	#@show j
+	
+	if j==J.right_len
+        @assert fx==j
+		#fx = j
+		j=j-1
+	end
+
+    #println("next\n\n")
+
+    return State{T}(fx-j, c.bt.backwardfan[(Int(j),J)])
+end
+
 
 function compute_loop(bt,rungs) #rungs is a list of rungs, all in the first ladder
 	S=Set{Track}(rungs)
@@ -1450,3 +1431,13 @@ function components(L::Longitude)
 	end
 end
 =#
+
+function extend(c::Cand{DiscreteHomeo}, s::State)
+
+end
+
+
+#Improved setup
+#We have an edge height type (indicating the height inside an edge, or more properly, inside a triangle)
+#And a junction height type (indicating the height inside the left or right fan)
+#And injection maps (going from (edge, height) junction height

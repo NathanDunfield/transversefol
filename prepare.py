@@ -1,3 +1,7 @@
+import sys
+sys.path.insert(0,"/home/jonathan/Dropbox/repo/Veering/scripts")
+sys.path.insert(0,"/home/jonathan/Dropbox/repo/Veering")
+
 import veering
 import regina
 import veering.veering_tri
@@ -6,10 +10,9 @@ import veering.transverse_taut
 #import sage
 import numpy as np
 import ast
+import json
 
 
-import sys
-sys.path.insert(0,"/home/jonathan/Dropbox/repo/Veering/scripts")
 sys.set_int_max_str_digits(0)
 import boundary_triangulation
 
@@ -85,8 +88,9 @@ def prepare_example(vt, isosig="test", longitude=None):
 
 	fname = "batch/" + isosig + ".pdf"
 	fans = veering.transverse_taut.edge_side_face_collections(vt.tri,vt.angle)
+	face_coorientations=veering.transverse_taut.convert_tetrahedron_coorientations_to_faces(vt.tri,vt.coorientations)
 	print("fans=" + str(fans), file=info_file)
-	print("face_coorientations=OffsetArrays.Origin(0)(" + str(veering.transverse_taut.convert_tetrahedron_coorientations_to_faces(vt.tri,vt.coorientations)) + ")", file=info_file)
+	print("face_coorientations=OffsetArrays.Origin(0)(" + str(face_coorientations) + ")", file=info_file)
 
 	args = {'style':'ladders', 'draw_boundary_triangulation':True, 'draw_triangles_near_poles': False, 'ct_depth':-1, 'ct_epsilon':0.03, 'global_drawing_scale': 4, 'delta': 0.2, 'ladder_width': 10.0, 'ladder_height': 30.0, 'draw_labels': True}
 	
@@ -115,6 +119,8 @@ def prepare_example(vt, isosig="test", longitude=None):
 	"""
 	
 	first_rungs = [runglist[0][0] for runglist in bt.rungs()]
+	rungs = bt.rungs()
+	alledges = bt.all_edges()
 	print("firstrungs = " + str(first_rungs), file=info_file)
 
 	print("rungs = " + str(bt.rungs()), file=info_file)
@@ -143,6 +149,19 @@ def prepare_example(vt, isosig="test", longitude=None):
 	else:
 		print("longitude=nothing", file=info_file)
 	info_file.close()
+
+	info_file = open("batch/" + isosig + ".json",'w')
+	json.dump({"fans": str(fans), 
+		"face_coorientations": str(face_coorientations),
+		"firstrungs": str(first_rungs),
+		"rungs": str(rungs),
+		"alledges": str(alledges),
+		"top_bot_pairs": str(top_bot_pairs),
+		"preferred_longitude": "nothing" if longitude == None else str(longitude)
+		},
+		info_file, indent=4)
+	info_file.close()
+	
 
 def prepare_by_isosig(isosig):
 	x = taut.isosig_to_tri_angle(isosig)
@@ -178,7 +197,7 @@ if __name__ == "__main__":
 		f.close()	
 		f2.close()
 
-	#prepare_by_isosig("eLMkbcddddedde_2100")
+	prepare_by_isosig("eLMkbcddddedde_2100")
 	#prepare_by_isosig("gvLQQcdeffeffffaafa_201102")
 	#prepare_by_isosig("gLLAQcdecfffhsermws_122201")
 	#prepare_by_isosig("fLLQcbecdeepuwsua_20102")	

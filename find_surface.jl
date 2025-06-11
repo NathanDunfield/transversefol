@@ -120,14 +120,14 @@ function compute_homology(fans, top_bot_pairs)
     #V,E,F are the number of vertices, edges, faces in the dual graph
 	l = collect(Iterators.flatten(Iterators.flatten(relations)))
 	sort!(l)
-	E = maximum(l)+1
-    F=length(l)
+	E = maximum(l)+1 #equals number of faces in the veering triangulation
+    F=length(relations) #equals number of edges in the veering triangulation
 	@assert length(l) == (maximum(l)+1)*3
 
     l2 = unique(collect(Iterators.flatten(top_bot_pairs)))
     V = maximum(l2)+1
 
-    @show V,E,F
+    @assert V-E+F==0
     
 
     M=zeros(Int, V+E+F, V+E+F)
@@ -148,26 +148,38 @@ function compute_homology(fans, top_bot_pairs)
 
     diag, gens = MyLinearAlgebra.homology(M)
     allgens = [gens[:,i] for i in 1:size(gens,2) if diag[i]==0] #extract the generators corresponding to nontorsion
+    #vertgens = filter(x->all(x[V+1:E].==0) && all(x[V+E+1:V+E+F].==0), allgens) #extract the generators of H_0
     edgegens = filter(x->all(x[1:V].==0) && all(x[V+E+1:V+E+F].==0), allgens) #extract the generators of H_1
-    @show length(edgegens)
-    trimmed = [x[V+1:V+E] for x in edgegens]
+    #facegens = filter(x->all(x[1:V+E].==0), allgens) #extract the generators of H_2
+    trimmed = [x[V+1:V+E] for x in edgegens] #the generators of H_1, as a vector of length E.
 
-    extra = [1 for i in 1:E] #we want this element in our homology basis. So we will add it first, and then see where rank goes down. Possibly breaks if this element is trivial in homology.
+    extra = [1 for i in 1:E] #we want this element in our homology basis. So we will add it first, and then remove elements which are dependent on previous ones
+
+    pushfirst!(trimmed, extra)
+
     d_image = [M[V+1:V+E, i] for i in V+E+1:V+E+F]
 
-    lastrank = rankx(stack(cat(d_image, [extra], dims=1)))
+    lastrank = rankx(stack(d_image)) #a basis for the image of d
+
     @show length(trimmed)
     @show lastrank
+
     for i in 1:length(trimmed)
-        nextrank = rankx(stack(cat(d_image,[extra],trimmed[1:i],dims=1)))
+        @show trimmed
+
+        nextrank = rankx(stack(cat(d_image,trimmed[1:i],dims=1)))
         @show nextrank
         if nextrank == lastrank
+            if i==1
+                println("Warning, all 1's is trivial in homology")
+            end
             deleteat!(trimmed, i)
             break
         end
         lastrank = nextrank
     end
-    return trimmed
+    @show trimmed
+    return trimmed 
 end
 
 function find_longitudes_hom(fans, top_bot_pairs) #find longitudes by homology class
@@ -188,6 +200,7 @@ function find_longitudes_hom(fans, top_bot_pairs) #find longitudes by homology c
     end
 
     hom_classes = compute_homology(fans, top_bot_pairs)
+    @assert length(hom_classes) >= 1
 
     H = transpose(stack(hom_classes))
     nH = size(H,1)
@@ -215,19 +228,19 @@ function find_longitudes_hom(fans, top_bot_pairs) #find longitudes by homology c
 		@variable(model, x[1:n], Int)
 		@constraint(model, M * x .== 0)
 		@constraint(model, x .>= 0)
-		@constraint(model, sum(x) == a)
+		#@constraint(model, sum(x) == a)
 
 		#@objective(model, Min, sum(x))
 
 
         @constraint(model, con, H*x == [0 for i in 1:nH])
 
-        for hom_class in CartesianIndices(tuple([-3*a*sum(abs.(hom_classes[i])):3*a*sum(abs.(hom_classes[i])) for i in 1:nH]...))
+        for hom_class in CartesianIndices(tuple([-3*a*sum(abs.(hom_classes[i])):3*a*sum(abs.(hom_classes[i])) for i in 2:nH]...))
             if is_valid(model, con)
                 delete(model, con)
                 unregister(model, :con)
             end
-            @constraint(model, con, H*x == Int[Tuple(hom_class)...])
+            @constraint(model, con, H*x == Int[a, Tuple(hom_class)...])
             @objective(model, Min, 0)
             optimize!(model)
             if is_solved_and_feasible(model)
@@ -253,9 +266,12 @@ function find_longitudes_hom(fans, top_bot_pairs) #find longitudes by homology c
 		end
 	end
 
-    @async @threads :greedy for a in takewhile(x -> isopen(ch), Iterators.countfrom(0,1))
-		search_interval(a)
-	end
+    @async begin
+        @threads :greedy for a in takewhile(x -> isopen(ch), 1:100) #Iterators.countfrom(0,1))
+            search_interval(a)
+        end
+        close(ch)
+    end
 
 	#todo: clean up tasks when channel is closed
 	return ch

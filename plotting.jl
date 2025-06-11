@@ -1,5 +1,6 @@
 #using Plots
 using PlotlyJS
+using WebIO
 #plotlyjs()
 #
 #
@@ -85,8 +86,17 @@ function _plotjs(E1::Envelope{Lower}, E2::Envelope{Upper}; color=TAUT_COLOUR, na
 	all_pts1=sort(vcat(pts1,[(pts1[i+1][1], pts1[i][2]) for i in 1:length(pts1)-1]), by=x->(x[1],-x[2]))
 	all_pts2=sort(vcat(pts2,[(pts2[i][1], pts2[i+1][2]) for i in 1:length(pts2)-1]), by=x->(x[1],-x[2]))
 	=#
+    if dim==1
+        @assert length(E1.A)<=1
+        @assert length(E2.A)<=1
 
-	if dim==2
+        if length(E1.A)==0 || length(E2.A)==0 || E1.A[1][1] > E2.A[1][1]
+            return []
+        else
+            #return [PlotlyJS.scatter(x=[E1.A[1][1], E2.A[1][1]],y=[0,0], mode="lines", name=name, legendgroup = name, line=attr(color=color))]
+            return [PlotlyJS.scatter(x=[E1.A[1][1][1], E2.A[1][1][1]],y=[0,0], mode="lines", name=name, legendgroup = name, line=attr(color=color))]
+        end
+    elseif dim==2
 		all_pts1=staircase(E1)
 		all_pts2=staircase(E2)
 
