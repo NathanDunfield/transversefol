@@ -12,7 +12,7 @@ function tryparse(::Type{Vector{String}}, str::String)
     split(chop(str, head=1),',')
 end
 
-veering_census = CSV.read(joinpath(@__DIR__,"veering_census_with_data.txt"), DataFrame,
+veering_census = CSV.read(joinpath(@__DIR__,"..","data","veering_census_with_data.txt"), DataFrame,
              types = [String, String, Int,  String, Int, String, Int, Vector{Int}, Vector{Int}, String, Vector{String}],
              header = [:isosig, :depth, :ncusps, :geometric, :nsymmetries, :edgeorientable, :eulerclass, :nladders, :ntetrahedra, :homology, :names]
             )

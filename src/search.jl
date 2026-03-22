@@ -7,8 +7,8 @@ using Base.Threads
 using Measurements
 using StaticArrays
 using LinearAlgebra
-using Envelopes
-import Envelopes: Envelope
+using .Envelopes
+import .Envelopes: Envelope
 #import Plots: plot
 
 

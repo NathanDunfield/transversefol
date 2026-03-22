@@ -2,7 +2,7 @@ using Serialization
 
 function _load_prep(isosig::String)
     python = "/home/jonathan/miniconda3/envs/sage/bin/python3"
-    script = joinpath(@__DIR__, "prepare.py")
+    script = joinpath(@__DIR__, "..", "prepare.py")
     json_str = read(`$python $script $isosig`, String)
     raw = JSON.parse(json_str)
 
