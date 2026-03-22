@@ -38,7 +38,6 @@ include("MyLinearAlgebra.jl")
 using .MyLinearAlgebra
 
 # Core source files
-include("DiscreteHomeos.jl")
 include("search.jl")
 include("find_surface.jl")
 include("plotting.jl")

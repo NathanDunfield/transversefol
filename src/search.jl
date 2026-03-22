@@ -185,7 +185,7 @@ function Base.show(io::IO, c::Cand{S}) where {S}
 end
 
 
-includet("DiscreteHomeos.jl")
+include("DiscreteHomeos.jl")
 
 function Envelope()
     return Envelope{Upper,Float64,Cand{DiscreteHomeo{Tuple{Int,Int}}}}()

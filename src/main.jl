@@ -480,8 +480,8 @@ function runjob(isosig::String; rt=0, thickness=24, ex=false, reg=false, nlongs=
 	if isinteractive() && verbose
 		display(p)
 	end
-    PlotlyJS.savefig(p, "batch/$(isosig).html")
-    PlotlyJS.savefig(p, "batch/$(index).html")
+    PlotlyJS.savefig(p, joinpath(BATCH_DIR, "$(isosig).html"))
+    PlotlyJS.savefig(p, joinpath(BATCH_DIR, "$(index).html"))
     #save((tup..., Eupper=Eupper, Elower=Elower))
     println("done job")
 	flush(stdout)
@@ -596,7 +596,7 @@ function review()
 	interesting_isosigs = []
 	for i in 1:120
 		try
-			tup = deserialize("/home/jonathan/engaging_sshfs/transversefol/batch/$(isosigs[i]).jls")
+			tup = deserialize(joinpath(CLUSTER_BATCH_DIR, "$(isosigs[i]).jls"))
 			L=length(tup.Elower) + length(tup.Eupper)
 			println("$i total weight $(L)")
 			if L > 2
@@ -645,7 +645,7 @@ function flagbad(range)
     for n in range
         isosig=isosigs[n]
         include("batch/$(isosig).txt")
-		f="/home/jonathan/engaging_sshfs/transversefol/batch/$(isosig).jls"
+		f=joinpath(CLUSTER_BATCH_DIR, "$(isosig).jls")
         if isfile(f)
             try
                 tup = deserialize(f)
@@ -711,7 +711,7 @@ function aggregate_bounds(X)
 	for i in 1:100
 		isosig = isosigs[i]
         include("batch/$(isosig).txt")
-		f="/home/jonathan/engaging_sshfs/transversefol/batch/$(isosig).jls"
+		f=joinpath(CLUSTER_BATCH_DIR, "$(isosig).jls")
         if isfile(f)
             try
                 tup = deserialize(f)

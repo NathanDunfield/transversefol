@@ -5,4 +5,19 @@ __pycache__
 cysignals*
 *.svg
 *.ma
-identify/batch/*
+find_pA/batch/*
+# Data directories
+cache/
+find_pA/dunfield_list/
+find_pA/hodgson_weeks_pA/
+flipper_examples/
+veering_census.txt
+find_pA/veering_census.sq3
+find_pA/veering_census_with_data.txt
+# Generated outputs
+*.pb.gz
+*.png
+*.nb
+cruft/
+scripts/
+CLAUDE.md

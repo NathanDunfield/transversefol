@@ -1,5 +1,8 @@
 using Serialization
 
+const BATCH_DIR = joinpath(@__DIR__, "..", "batch")
+const CLUSTER_BATCH_DIR = "/home/jonathan/engaging_sshfs/transversefol/batch"
+
 function _load_prep(isosig::String)
     python = "/home/jonathan/miniconda3/envs/sage/bin/python3"
     script = joinpath(@__DIR__, "..", "prepare.py")
@@ -34,8 +37,8 @@ end
 function latest_save(filename)
     CUTOFF = Dates.datetime2unix(Dates.DateTime(2026,02,22,00,00) + Hour(4))
 	locations=[]
-    push!(locations, "/home/jonathan/Dropbox/jonathan/transversefol/batch/$(filename)")
-    push!(locations, "/home/jonathan/engaging_sshfs/transversefol/batch/$(filename)")
+    push!(locations, joinpath(BATCH_DIR, filename))
+    push!(locations, joinpath(CLUSTER_BATCH_DIR, filename))
 
     locations = sort(filter(f->mtime(f) > CUTOFF, filter(isfile, locations)), by=mtime)
 	if length(locations)==0
@@ -65,7 +68,7 @@ function loadstat(isosig::String; refresh=false)
 end
 
 function savestat(d::Dict)
-    open("batch/$(d["isosig"])_stat.json", "w") do io 
+    open(joinpath(BATCH_DIR, "$(d["isosig"])_stat.json"), "w") do io
         JSON.print(io, d)
     end
 end
@@ -125,7 +128,7 @@ function load(isosig::String; refresh=false, nlongs=100)
 end
 
 function save(tup) #always save locally
-	serialize("batch/$(tup.isosig).jls", tup)
+	serialize(joinpath(BATCH_DIR, "$(tup.isosig).jls"), tup)
 end
 
 

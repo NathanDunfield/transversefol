@@ -1,5 +1,6 @@
 
 using Blink
+#=
 @eval AtomShell begin
     function init(; debug = false)
         electron() # Check path exists
@@ -14,6 +15,7 @@ using Blink
         return shell
     end
 end
+=#
 
 function quickview(tup::NamedTuple; longitudes=true, obstructions=true, contact_structures=false, font_size=30, save_html=true, save_png=false,png_width::Int=1920, png_height::Int=1080, png_scale::Real=1)
     isosig = tup.isosig
@@ -24,6 +26,7 @@ function quickview(tup::NamedTuple; longitudes=true, obstructions=true, contact_
 	Elower = tup.Elower
 
 
+    #=
 	if isosig == "eLMkbcddddedde_2100"
         dummy_candidate=random_cand(tup.bt, 1, DOWN)
 		for pt in [(-2,1/2), (-1, 1/3), (-1/2, 1/6), (-1/3, 1/9), (-1/4, 1/12), (-1/5, 1/15), (-1/6, 1/18)]
@@ -31,6 +34,7 @@ function quickview(tup::NamedTuple; longitudes=true, obstructions=true, contact_
 			push!(Elower, (map(x->-x,pt), dummy_candidate))
 		end
 	end
+    =#
 
 
     @show length(tup.longitudes)
@@ -239,10 +243,10 @@ function quickview(tup::NamedTuple; longitudes=true, obstructions=true, contact_
     end
 
     if save_html
-        PlotlyJS.savefig(p, "batch/$(index).html")
+        PlotlyJS.savefig(p, joinpath(BATCH_DIR, "$(index).html"))
     end
     if save_png
-        PlotlyJS.savefig(p, "batch/$(index).png", width=png_width, height=png_height, scale=png_scale)
+        PlotlyJS.savefig(p, joinpath(BATCH_DIR, "$(index).png"), width=png_width, height=png_height, scale=png_scale)
     end
 	flush(stdout)
 
@@ -290,15 +294,15 @@ end
 
 
 function viewladderpole(i::Int)
-    run(`evince batch/$(VeeringCensus.lookup(i)).pdf`)
+    run(`evince $(joinpath(BATCH_DIR, "$(VeeringCensus.lookup(i)).pdf"))`)
 end
 
 function viewladderpole(i::Int, ncusps::Int)
-    run(`evince batch/$(VeeringCensus.lookup(i,ncusps)).pdf`)
+    run(`evince $(joinpath(BATCH_DIR, "$(VeeringCensus.lookup(i,ncusps)).pdf"))`)
 end
 
 function viewladderpole(isosig::String)
-    run(`evince batch/$(isosig).pdf`)
+    run(`evince $(joinpath(BATCH_DIR, "$(isosig).pdf"))`)
 end
 
 function quickview(i::Int, ncusps::Int; kwargs...)
