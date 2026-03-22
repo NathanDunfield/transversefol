@@ -25,7 +25,7 @@ import os
 sys.set_int_max_str_digits(0)
 
 
-#veering_knots_with_data = file_io.parse_data_file("knot_hom_census_with_data.txt")
+#veering_knots_with_data = file_io.parse_data_file("data/knot_hom_census_with_data.txt")
 
 CACHE_PATH="/home/jonathan/Dropbox/jonathan/transversefol/cache"
 
