@@ -314,8 +314,8 @@ end
 function set_roundmode(h::DiscreteHomeo, r::RoundMode)
     return DiscreteHomeo(h.ordering, h.dir, r)
 end
-function set_roundmode(h::DiscreteHomeo2, r::RoundMode)
-    return DiscreteHomeo2(h.ordering_l, h.ordering_r, r)
+function set_roundmode(h::DiscreteHomeoAlt, r::RoundMode)
+    return DiscreteHomeoAlt(h.ordering_l, h.ordering_r, r)
 end
 
 #=
@@ -585,7 +585,7 @@ function show_trace(c::Cand{H}; time=50) where {H}
     end
 end
 
-rand_init(::Type{H}) where {H<:DiscreteHomeo2} = 0//1 
+rand_init(::Type{H}) where {H<:DiscreteHomeoAlt} = 0//1 
 rand_init(c::Cand) = rand_init(typeof(c.d[c.bt.junctions[1]]))
 rand_init(::Type{DiscreteHomeo{T}}) where {T} = 1
 #rand_init(::Type{CompositeHomeo{H}}) where {H} = rand_init(H)
@@ -829,6 +829,14 @@ function Mannealing(f, initial, _jiggle, betastart, betafinish, nsteps; verbose=
     return to_static(current)
 end
 =#
+
+#annealing with a population of candidates
+function pop_annealing(f, initial, jiggle, beta, nsteps; verbos=true, minacc = 100, maxacc = 5000)
+    current = initial
+    curracc = minacc
+    currval = f(current; acc=curracc)
+
+end
 
 function annealing(f, initial, jiggle, betastart, betafinish, nsteps; verbose=true, minacc = 100, maxacc = 5000)
 	#linear annealing on range betastart, betafinish

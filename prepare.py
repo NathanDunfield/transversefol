@@ -20,11 +20,14 @@ import itertools
 import boundary_triangulation
 import ast
 import time
+import os
 
 sys.set_int_max_str_digits(0)
 
 
 #veering_knots_with_data = file_io.parse_data_file("knot_hom_census_with_data.txt")
+
+CACHE_PATH="/home/jonathan/Dropbox/jonathan/transversefol/cache"
 
 def sign(perm):
 	l=4
@@ -233,10 +236,11 @@ def find_longitudes(vt):
 """
 
 
-def prepare_example(vt, isosig="test", longitude=None, draw_bt=False):
-	info_file = open("batch/" + isosig + ".txt",'w')
+def compute_prep(isosig, longitude=None, draw_bt=False):
+	x = taut.isosig_to_tri_angle(isosig)
+	vt = veering.veering_tri.veering_triangulation(*x)
 
-	fname = "batch/" + isosig + ".pdf"
+
 	fans = veering.transverse_taut.edge_side_face_collections(vt.tri,vt.angle)
 	face_coorientations=veering.transverse_taut.convert_tetrahedron_coorientations_to_faces(vt.tri,vt.coorientations)
 	#print("fans=" + str(fans), file=info_file)
@@ -251,6 +255,7 @@ def prepare_example(vt, isosig="test", longitude=None, draw_bt=False):
 			L.calc_verts_C(args=args)
 	
 	if draw_bt:
+		fname = "batch/" + isosig + ".pdf"
 		bt.generate_canvases(args=args)#this does some important setup... I think the for loop above does the same
 		bt.draw(fname,args=args)
 
@@ -332,7 +337,7 @@ def prepare_example(vt, isosig="test", longitude=None, draw_bt=False):
 	"""
 
 
-	d = {"fans": fans, 
+	data = {"fans": fans, 
 		"face_coorientations": face_coorientations,
 		"poles": poles,
 		"rungs": rungs,
@@ -343,23 +348,32 @@ def prepare_example(vt, isosig="test", longitude=None, draw_bt=False):
 		"longitude_dict": longitude_dict,
 		"degeneracy": degeneracy,
 		}
+
+	"""
 	if len(isosig.split("_")) >= 3:
 		filling_slopes = ast.literal_eval(isosig.split("_")[2])
 		#print(filling_slopes)
 		assert len(filling_slopes) == len(degeneracy)
 		d["prong_counts"] = [abs(intersection_number(a,b)) for a,b in zip(filling_slopes, degeneracy)]
+	"""
 
-	info_file = open("batch/" + isosig + ".json",'w')
-	json.dump(dict((k,str(v)) for k,v in d.items()),
-		info_file, indent=4)
-	info_file.close()
-	return d 
+	return data
 	
 
-def prepare_by_isosig(isosig, draw_bt=False):
-	x = taut.isosig_to_tri_angle(isosig)
-	v = veering.veering_tri.veering_triangulation(*x)
-	return prepare_example(v, isosig = isosig, draw_bt=draw_bt)
+def get_prep(isosig, draw_bt=False):
+	cache_filename = os.path.join(CACHE_PATH, isosig + ".json")
+	try:
+		with open(cache_filename) as cachefile:
+			#print("Retrieving from cache")
+			data = {k: ast.literal_eval(v) for k,v in json.load(cachefile).items()}
+
+	except FileNotFoundError:
+		#print("Computing")
+		data = compute_prep(isosig,draw_bt=draw_bt)
+		with open(cache_filename,'w') as info_file:
+			json.dump(dict((k,str(v)) for k,v in data.items()),
+				info_file, indent=4)
+	return data
 
 if __name__ == "__main__":
 	if False:
@@ -390,21 +404,9 @@ if __name__ == "__main__":
 		f.close()	
 		f2.close()
 
-	#prepare_by_isosig("eLMkbcddddedde_2100")
-	#prepare_by_isosig("gvLQQcdeffeffffaafa_201102")
-	#prepare_by_isosig("gLLAQcdecfffhsermws_122201")
-	#prepare_by_isosig("fLLQcbecdeepuwsua_20102")	
-	#prepare_by_isosig("fLLQcbeddeehhbghh_01110")
-	#prepare_by_isosig("gLLPQbefefefhhhhhha_011102")
-	#prepare_by_isosig("gLLPQcdfefefuoaaauo_022110")
-	#prepare_by_isosig("jLvvQQQbhigghihgixaxxvvvvcc_102222010")
-	#prepare_by_isosig("hLLzQkcdefggfghspadgsg_1222011")
-	#prepare_by_isosig("iLLALQcbcdefghhhtsfxjoxqt_20102120")
-	#prepare_by_isosig("gLLPQccdfeffhggaagb_201022")
-	#prepare_by_isosig("iLLAMMccdecffghhhsermstqs_12220120")
-	#prepare_by_isosig("jLLLzQQbeeeghihiixxaavvvvcv_211120000")
-	#prepare_by_isosig("iLLLQPcbeegefhhhhhhahahha_01110221")
-	#get_peripheral_weights("gLLAQcdecfffhsermws_122201")
-	prepare_by_isosig("ivvPQQcfhghgfghfaaaaaaaaa_01122000", draw_bt=True)
-	for isosig in sys.argv[1:]:
-		prepare_by_isosig(isosig)
+	if len(sys.argv) > 1:
+		isosig = sys.argv[1]
+		data = get_prep(isosig)
+		print(json.dumps({k: str(v) for k, v in data.items()}))
+	else:
+		get_prep("gvLQQcdeffeffffaafa_201102")

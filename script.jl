@@ -1,4 +1,3 @@
-using Serialization
 using DataFrames
 using StatProfilerHTML
 using Revise
@@ -8,63 +7,14 @@ using VeeringCensus
 using JSON
 using Envelopes
 
-using Blink
-@eval AtomShell begin
-    function init(; debug = false)
-        electron() # Check path exists
-        p, dp = port(), port()
-        debug && inspector(dp)
-        dbg = debug ? "--debug=$dp" : []
-        proc = (debug ? run_rdr : run)(
-            `$(electron()) --no-sandbox $dbg $mainjs port $p`; wait=false)
-        conn = try_connect(ip"127.0.0.1", p)
-        shell = Electron(proc, conn)
-        initcbs(shell)
-        return shell
-    end
-end
 
 includet("search.jl")
 includet("find_surface.jl")
 includet("plotting.jl")
 includet("draw_bt.jl")
+includet("view.jl")
+includet("io.jl")
 
-function mathematica_print(f::IO, l::Union{Array,Tuple})
-	print(f,"{")
-	for i in l[1:end-1]
-		mathematica_print(f,i)
-		print(f,",")
-        #=
-        if !(typeof(i) <: Real)
-            println(f)
-        end
-        =#
-	end
-	mathematica_print(f,l[end])
-	print(f,"}")
-end
-
-function mathematica_print(f::IO,l::Real)
-	print(f,Float64(l))
-end
-
-function dump_points(isosig)
-    tup = load(isosig)#deserialize("/home/jonathan/Dropbox/jonathan/transversefol/batch/$(isosig).jls")
-
-    @show length(tup.Elower.A), length(tup.Eupper.A)
-    open("pointdump.ma","w") do f
-
-        mathematica_print(f,[[x for (x,y) in tup.Elower.A],
-        [x for (x,y) in tup.Eupper.A],
-        find_s2_longitudes(tup)])
-    end
-
-    Econstr_lower, Econstr_upper = obstructions(tup; isosig=isosig)
-
-    open("udump.ma", "w") do f
-        mathematica_print(f,[crevices_general(Econstr_upper), crevices_general(Econstr_lower)])
-    end
-end
 
 function minchi(tup)
     chi=-Inf
@@ -158,117 +108,6 @@ function compute_longitudes(bt, fans, top_bot_pairs; nlongs=100)
 	return Elong, longitudes
 end
 
-function latest_save(filename)
-    CUTOFF = Dates.datetime2unix(Dates.DateTime(2026,02,22,00,00) + Hour(4))
-	locations=[]
-    push!(locations, "/home/jonathan/Dropbox/jonathan/transversefol/batch/$(filename)")
-    push!(locations, "/home/jonathan/engaging_sshfs/transversefol/batch/$(filename)")
-
-    locations = sort(filter(f->mtime(f) > CUTOFF, filter(isfile, locations)), by=mtime)
-	if length(locations)==0
-		println("not found")
-        return nothing
-	else
-		println("loading from $(locations[end])")
-        println(Dates.unix2datetime(mtime(locations[end]))-Hour(4)) #show in Eastern time zone
-        return locations[end]
-	end
-end
-
-function load(i::Int; kwargs...)
-    load(VeeringCensus.lookup(i); kwargs...)
-end
-function load(i::Int, ncusps::Int; kwargs...)
-    load(VeeringCensus.lookup(i,ncusps); kwargs...)
-end
-
-function loadstat(isosig::String; refresh=false)
-    path = latest_save("$(isosig)_stat.json")
-    if path==nothing || refresh
-        return Dict{String,Any}("isosig"=>isosig)
-    else
-        return JSON.parsefile(path)
-    end
-end
-
-function savestat(d::Dict)
-    open("batch/$(d["isosig"])_stat.json", "w") do io 
-        JSON.print(io, d)
-    end
-end
-
-function load(isosig::String; refresh=false, refresh_prep=false, nlongs=100)
-	println("setting up $(isosig), requesting $(nlongs) longitudes")
-	flush(stdout)
-    
-    path = latest_save("$(isosig).json")
-	if path==nothing || refresh_prep
-		println("batch/$(isosig).json not found, preparing it now")
-		flush(stdout)
-		#run(`/home/jonathan/.py3env/bin/python3 prepare.py $(isosig)`)
-		run(`/home/jonathan/miniconda3/envs/sage/bin/python3 prepare.py $(isosig)`)
-	end
-
-
-    path = latest_save("$(isosig).jls")
-
-        _prep = Dict{Symbol,Any}(Symbol(key)=>eval(Meta.parse(value)) for (key,value) in JSON.parsefile("batch/$(isosig).json"))
-        _prep[:face_coorientations] = OffsetArrays.Origin(0)(_prep[:face_coorientations])
-        _prep[:meridian_dict] = Dict{Track,Int}(x=>y for (x,y) in _prep[:meridian_dict])
-        _prep[:longitude_dict] = Dict{Track,Int}(x=>y for (x,y) in _prep[:longitude_dict])
-
-        prep = NamedTuple(_prep)
-
-	if path == nothing || refresh || refresh_prep
-
-        bt=BoundaryTriangulation(prep.fans, 
-                                 prep.face_coorientations, 
-                                 prep.alledges, 
-                                 prep.poles, 
-                                 prep.rungs, 
-                                 prep.meridian_dict, 
-                                 prep.longitude_dict)
-
-		ncusps = length(bt.rungs)
-
-
-        function filternan(A::Vector{T}) where {T}
-            tmp = collect(filter(x->!(any(isinf.(x[1]))), A))
-            return tmp
-        end
-
-
-		Elong, longitudes = compute_longitudes(bt, prep.fans, prep.top_bot_pairs; nlongs=nlongs)
-		Eupper = Envelope{Upper}(filternan(Elong.A))
-        Elower = Envelope{Lower}([(x,set_roundmode(c, UP)) for (x,c) in filternan(Elong.A)])
-
-        #Eupper= Envelope{Upper,Float64,Cand{DiscreteHomeo}}()
-        #Elower= Envelope{Lower,Float64,Cand{DiscreteHomeo}}()
-
-
-		tup = (bt=bt, Eupper=Eupper, Elower=Elower, Elong=Elong, longitudes=longitudes, isosig=isosig, prep = prep)
-        save(tup)
-	else
-        tup = (deserialize(path)..., isosig=isosig)
-
-		if length(tup.longitudes) < nlongs
-            Elong, longitudes = compute_longitudes(tup.bt, prep.fans, prep.top_bot_pairs; nlongs=nlongs)
-            for (x,c) in Elong.A
-                push!(tup.Eupper, (x,c))
-                push!(tup.Elower, (x,c))
-            end
-			tup = (tup...,longitudes=longitudes)
-            save(tup)
-		end
-	end
-	println("done setup")
-	flush(stdout)
-	return tup
-end
-
-function save(tup) #always save locally
-	serialize("batch/$(tup.isosig).jls", tup)
-end
 
 function regimen(E::Envelope, target::Vector{T}; verbose=false) where {T<:Real}
 	#ncusps = length(E.A[1][1])
@@ -681,29 +520,6 @@ function bench()
     bench(c)
 end
 
-function viewladderpole(i::Int)
-    run(`evince batch/$(VeeringCensus.lookup(i)).pdf`)
-end
-
-function viewladderpole(i::Int, ncusps::Int)
-    run(`evince batch/$(VeeringCensus.lookup(i,ncusps)).pdf`)
-end
-
-function viewladderpole(isosig::String)
-    run(`evince batch/$(isosig).pdf`)
-end
-
-function quickview(i::Int, ncusps::Int)
-    quickview(VeeringCensus.lookup(i,ncusps))
-end
-
-function quickview(i::Int)
-    quickview(VeeringCensus.lookup(i))
-end
-
-function quickview(isosig::String)
-	quickview(load(isosig))
-end
 
 #=
 function constr_dict()
@@ -819,265 +635,6 @@ function obstructions(tup::NamedTuple)
     return Econstr_lower, Econstr_upper
 end
 
-function quickview(tup::NamedTuple)
-    isosig = tup.isosig
-    index = VeeringCensus.index(isosig)
-
-    #include("batch/$(isosig).txt")
-	Eupper = tup.Eupper
-	Elower = tup.Elower
-
-
-    #=
-	if isosig == "eLMkbcddddedde_2100"
-        dummy_candidate=random_cand(tup.bt, 1, DOWN)
-		for pt in [(-2,1/2), (-1, 1/3), (-1/2, 1/6), (-1/3, 1/9), (-1/4, 1/12), (-1/5, 1/15), (-1/6, 1/18)]
-			push!(Eupper, (pt, dummy_candidate))
-			push!(Elower, (map(x->-x,pt), dummy_candidate))
-		end
-	end
-    =#
-
-
-    @show length(tup.longitudes)
-
-
-	bt = tup.bt
-    ncusps=bt.ncusps
-
-    function namedtuple(slopes)
-        @assert length(slopes)==ncusps
-        if ncusps==1
-            return (x=slopes[1], y=0)
-        elseif ncusps==2
-            return (x=slopes[1], y=slopes[2])
-        elseif ncusps==3
-            return (x=slopes[1], y=slopes[2], z=slopes[3])
-        end
-        @assert false
-    end
-
-    function plotting_directives()
-        if ncusps ==1 || ncusps == 2
-            return (x=:x, y=:y, type="scatter")
-        elseif ncusps==3
-            return (x=:x, y=:y, z=:z, type="scatter3d")
-        end
-    end
-
-
-    Econstr = PEnvelope()
-    Econstr_upper = Envelope{Upper,Float64,Cand{DiscreteHomeo{Tuple{Int,Int}}}}()
-    Econstr_lower = Envelope{Lower,Float64,Cand{DiscreteHomeo{Tuple{Int,Int}}}}()
-    longitudeDF = DataFrame()
-    constrDF = DataFrame()
-    long_slopes = []
-    for l in tup.longitudes
-        c=longitude_to_candidate(bt,l)
-        L=Longitude(bt,l)
-        ss=slopes(L)
-        sss = map(slope_to_rat, ss)
-
-
-        #b1=bound(tup.Eupper, sss[1])
-        #b2=bound(tup.Elower, sss[1])
-        push!(long_slopes, sss)
-        push!(longitudeDF, (ss=slopes(L), l=l,  namedtuple(sss)..., text=string((normchi=normalizedchi(L),ss=ss,weights=l)), nchi = normalizedchi(L)))
-
-        if is_fiber(l,tup.prep.top_bot_pairs)
-            #@assert connected_components(l,fans)==1
-            for (s,info) in constraints(L)
-                if all(!isnan(x) for x in s) && all(!isinf(x) for x in s) && info.npunc==1# && info.interior_prong >= 2
-                    push!(Econstr, (s,c))
-                    push!(constrDF, (namedtuple(s)...,text=string(info)))
-                    if info.dir[2] == -1
-                        push!(Econstr_upper, (s,c))
-                    else
-                        @assert info.dir[2] == 1
-                        push!(Econstr_lower, (s,c))
-                    end
-
-                end
-            end
-        else
-            #println("nonfiber: $(sss)")
-        end
-    end
-
-
-
-    long_ranges = [[minimum(filter(r -> abs(r) < CLIP/5, collect(x[i] for x in long_slopes)), init=CLIP),
-                           maximum(filter(r -> abs(r) < CLIP/5, collect(x[i] for x in long_slopes)), init=-CLIP)] for i in 1:ncusps]
-
-    paddings = [0.5 * (y-x) for (x,y) in long_ranges]
-    trimmed_ranges = [[range[1]-pad, range[2]+pad] for (range,pad) in zip(long_ranges, paddings)]
-
-    #=
-    config = PlotConfig(modeBarButtonsToAdd=[
-    "drawline",
-    "drawopenpath",
-    "drawclosedpath",
-    "drawcircle",
-    "drawrect",
-    "eraseshape"
-    ])
-    =#
-    config = PlotConfig(modeBarButtonsToAdd=[])
-
-    #info = run(pipeline(`cat veering_census_with_data.txt`, `grep $(isosig)`))
-    
-    axes = if ncusps == 1
-        (
-        xaxis=attr(
-            showticklabels=true,
-            range=trimmed_ranges[1]
-        ),
-        yaxis=attr(
-            showticklabels=false,
-            range=[-1,1]
-           ))
-    elseif ncusps == 2
-        (
-        xaxis=attr(
-            showticklabels=false,
-            range=trimmed_ranges[1],
-            title="cusp 1 slope"
-        ),
-        yaxis=attr(
-            showticklabels=false,
-            range=trimmed_ranges[2],
-            title="cusp 2 slope"
-           ))
-    elseif ncusps == 3
-        attr(scene=(
-        xaxis=attr(
-            showticklabels=false,
-            range=trimmed_ranges[1]
-        ),
-        yaxis=attr(
-            showticklabels=false,
-            range=trimmed_ranges[2]
-           ),
-
-        zaxis=attr(
-            showticklabels=false,
-            range=trimmed_ranges[3]
-           )))
-
-    end
-
-    data = VeeringCensus.lookup_row(index)
-
-    layout = Layout(title="#$(index)   $(data[:isosig])   $(data[:depth])    $(data[:names])"; axes..., legend=attr(font=attr(
-      size= 16)))
-
-    p=PlotlyJS.plot(layout)
-
-    #contact structures
-    #addtraces!(p, _plotjs(Elower, Envelope{Upper,Float64,Cand{DiscreteHomeo}}([([CLIP for i in 1:ncusps], dummy_candidate)]), color=NEG_CONTACT_COLOUR, name="negative contact structures")...)
-
-    #addtraces!(p, _plotjs(Envelope{Lower,Float64,Cand{DiscreteHomeo}}([([-CLIP for i in 1:ncusps],dummy_candidate)]), Eupper, color=POS_CONTACT_COLOUR, name="positive contact structures")...)
-
-    if length(Elower.A) > 0 && length(Eupper.A) > 0
-        addtraces!(p, _plotjs(Elower, Eupper, name="Z (foliated region)")...)
-    end
-
-    if haskey(tup, :Elowerbound)
-        addtraces!(p, _plotjs(tup.Elowerbound, tup.Eupperbound, name="bound")...)
-    end
-
-    if length(Econstr_lower.A) > 0
-        addtraces!(p, _plotjs(Econstr_lower, Envelope{Upper}([([CLIP for i in 1:ncusps], nothing)]), color=OBSTRUCTION_COLOUR, name="obstructions")...)
-    end
-    if length(Econstr_upper.A) > 0
-        addtraces!(p, _plotjs(Envelope{Lower}([([-CLIP for i in 1:ncusps],nothing)]), Econstr_upper, color=OBSTRUCTION_COLOUR, name="obstructions")...)
-    end
-
-
-    function clip_df(df)
-        return df
-        return subset(df, :x => x->abs.(x).<=CLIP, :y => y->abs.(y).<=CLIP)
-    end
-
-    if length(tup.Elong.A) > 0
-
-        #add_trace!(p, _plotjs(tup.Elong, color=LONGITUDE_COLOUR))
-        add_trace!(p, PlotlyJS.scatter(clip_df(longitudeDF); plotting_directives()..., marker=attr(line=attr(width=0), size=(ncusps<=2 ? 25 : 10) ./ log.(4 .- longitudeDF[!,:nchi]), color=LONGITUDE_COLOUR), text=:text, mode="markers", name="fibrations"))
-        add_trace!(p, PlotlyJS.scatter(clip_df(constrDF); plotting_directives()..., marker=attr(color=OBSTRUCTION_COLOUR, size=(ncusps<=2 ? 5 : 3)), text=:text, mode="markers", name="obstructions")) 
-    else
-        println("no longitudes")
-    end
-
-
-
-    #=
-    crevices = PEnvelope()
-    for y in [(Vector{T}(x).+0.01, dummy_candidate) for x in crevices_general(Econstr_lower)]
-        push!(crevices, y)
-    end
-    add_trace!(p, _plotjs(crevices, color=OBSTRUCTION_COLOUR))
-    =#
-
-    #add_trace!(p, _plotjs(Econstr_all, color=OBSTRUCTION_COLOUR))
-
-
-    #add_trace!(p, _plotjs(Econstr_upper, color=OBSTRUCTION_COLOUR))
-    #add_trace!(p, _plotjs(Econstr_lower, color=OBSTRUCTION_COLOUR))
-
-    if false
-        randE = random_trials(bt, nsubdivide=3, ntrials=1000000)
-        randE2 = PEnvelope()
-        for (x,c) in randE.A
-            push!(randE2, (approximant_all_slopes(c::Candidate; time=10000), c))
-        end
-
-        #add_trace!(p, _plotjs(randE, color=TAUT_COLOUR))
-        add_trace!(p, _plotjs(randE2, color=TAUT_COLOUR, name="random sample"))
-    end
-
-	PlotlyJS.savefig(p, "batch/$(index).html")
-	flush(stdout)
-
-    on(p["click"]) do data
-        @show data
-        for point in data["points"]
-            @show point
-            if ncusps == 1
-                coords = [point["x"]]
-            elseif ncusps == 2
-                coords = [point["x"],point["y"]]
-            elseif ncusps == 3
-                coords = [point["x"],point["y"],point["z"]]
-            end
-
-            println(rationalize.(coords))
-
-            for l in sort(tup.longitudes, by=sum)
-                L=Longitude(tup.bt,l)
-
-                ss=slopes(L)
-                if rationalize.(coords)==map(slope_to_rat, ss)
-                    println(constraints(L))
-                end
-            end
-
-
-            for (s,cand) in Iterators.flatten([tup.Elong.A, tup.Eupper.A, tup.Elower.A])
-                if s == coords
-                    global lastcand = cand
-                    for i in 1:ncusps
-                        draw(cand,i) |> display
-                    end
-                    break
-                end
-            end
-        end
-    end
-
-    return p
-
-	#interesting example isosigs[63]
-end
 
 function review()
 	include("batch/2cusp_manifest.txt")
@@ -1129,7 +686,6 @@ function slope_to_twist(x::AbstractVector{T}) where {T<:Union{Int, Rational}}
 end
 function slope_to_twist(x::AbstractVector{T}) where {T<:Real}
     return x[1]/x[2]
-
 end
 
 function flagbad(range)
@@ -1186,37 +742,6 @@ function flagbad(range)
 
 end
 
-function computestat(isosig::String, f; name=String(Symbol(f)))
-    d=loadstat(isosig)
-    d[name] = f(load(isosig))
-    savestat(d)
-end
-
-function computestat(indices::Union{AbstractVector{Int},AbstractRange{Int}}, f; name=String(Symbol(f)))
-    @threads for ind in indices
-        computestat(VeeringCensus.lookup(ind), f)
-    end
-end
-function computestat(indices::Union{AbstractVector{Int},AbstractRange{Int}},ncusps::Int, f; name=String(Symbol(f)))
-    @threads for ind in indices
-        computestat(VeeringCensus.lookup(ind, ncusps), f)
-    end
-end
-
-function reapstat(indices)
-    df = DataFrame()
-    for i in indices
-        push!(df, loadstat(VeeringCensus.lookup(i)), cols=:union)
-    end
-    return df
-end
-function reapstat(indices, ncusps::Int)
-    df = DataFrame()
-    for i in indices
-        push!(df, loadstat(VeeringCensus.lookup(i,ncusps)), cols=:union)
-    end
-    return df
-end
 
 function run_profile()
     runjob(1,2, reg=true, rt=0, nlongs=2, refresh=true)

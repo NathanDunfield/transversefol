@@ -166,4 +166,11 @@ function push!(e::Envelope{S,T,D}, _x::Tuple{Union{NTuple{N,R}, Vector{R}},D}) w
 	end
 end
 
+
+#Given lower_pts and upper_pts, compute a set of cubes whose union is the box closure
+function box_closure(lower_pts, upper_pts)
+
+end
+
+
 end

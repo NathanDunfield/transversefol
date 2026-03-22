@@ -182,7 +182,7 @@ function compute_homology(fans, top_bot_pairs)
     return trimmed 
 end
 
-function find_longitudes_hom(fans, top_bot_pairs) #find longitudes by homology class
+function find_longitudes_hom(fans, top_bot_pairs; primitive_only=true) #find longitudes by homology class
 	relations = [((x[1] for x in f1), (x[1] for x in f2)) for (f1,f2) in fans]
 
 	l = collect(Iterators.flatten(Iterators.flatten(relations)))
@@ -246,7 +246,7 @@ function find_longitudes_hom(fans, top_bot_pairs) #find longitudes by homology c
             if is_solved_and_feasible(model)
                 val=round.(Int,value.(x))
                 O=OffsetArrays.Origin(0)(val)
-                if is_primitive(O)
+                if !primitive_only || is_primitive(O)
                     try
                         put!(ch, O)
                     catch e

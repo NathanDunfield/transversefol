@@ -11,13 +11,13 @@ struct DiscreteHomeo{T} <: Homeo #todo: precompute the output heights
     roundmode::RoundMode
 end
 
-struct DiscreteHomeo2{T,S} <: Homeo
+struct DiscreteHomeoAlt{T,S} <: Homeo
     ordering_l::Vector{Tuple{T,S}}
     ordering_r::Vector{Tuple{T,S}} #T is the type of the inputs, S is the type of the middle index
     roundmode::RoundMode
 end
 
-function _is_valid(f::DiscreteHomeo2)
+function _is_valid(f::DiscreteHomeoAlt)
     ol = [x[1] for x in f.ordering_l]
     ol_m = [x[2] for x in f.ordering_l]
     or = [x[1] for x in f.ordering_r]
@@ -28,7 +28,7 @@ function _is_valid(f::DiscreteHomeo2)
     unique(ol_m) == unique(or_m)
 end
 
-function fix_heights!(c::Cand{H}) where {S,T,H<: DiscreteHomeo2{T,S}}
+function fix_heights!(c::Cand{H}) where {S,T,H<: DiscreteHomeoAlt{T,S}}
     for fnum in 0:2*c.bt.ntets-1
         #gather all the heights
         heights = Rational{Int}[]
@@ -66,7 +66,7 @@ function add_height!(c::Cand{H}, fnum::Int, height) where {H}
 end
 
 
-function insert_element(f::DiscreteHomeo2{T,S},el) where {T,S}
+function insert_element(f::DiscreteHomeoAlt{T,S},el) where {T,S}
     i = searchsortedlast(f.ordering_l, (el, zero(S)), by=x->x[1])
     @assert i >= 1
     if f.ordering_l[i][1] == el
@@ -76,12 +76,12 @@ function insert_element(f::DiscreteHomeo2{T,S},el) where {T,S}
         #find the closest element 
         push!(ordering_l, (el, f.ordering_l[i][2]))
         sort!(ordering_l)
-        return DiscreteHomeo2(ordering_l, f.ordering_r, f.roundmode)
+        return DiscreteHomeoAlt(ordering_l, f.ordering_r, f.roundmode)
     end
 end
 
-function inv(f::DiscreteHomeo2)
-    return DiscreteHomeo2(f.ordering_r, f.ordering_l, f.roundmode)
+function inv(f::DiscreteHomeoAlt)
+    return DiscreteHomeoAlt(f.ordering_r, f.ordering_l, f.roundmode)
 end
 
 struct CompositeHomeo{H} <: Homeo
@@ -126,7 +126,7 @@ myzero(T::Type{Tuple{A,B}}) where {A,B} = (myzero(A),one(B))
 myzero(X::Type{T}) where T<:Real= zero(X)
 myzero(::Type{Rational{T}}) where {T} = zero(Rational{T})
 
-function is_low(f::DiscreteHomeo2{T,S}, x::T) where {T,S}
+function is_low(f::DiscreteHomeoAlt{T,S}, x::T) where {T,S}
     r=searchsorted(f.ordering_l, (x,myzero(S)), by = a->a[1])
     @assert length(r)==1
 
@@ -137,7 +137,7 @@ function is_low(f::DiscreteHomeo2{T,S}, x::T) where {T,S}
     return r[1]==s[1]
 end
 
-function (f::DiscreteHomeo2{T,S})(x::T) where {T,S}
+function (f::DiscreteHomeoAlt{T,S})(x::T) where {T,S}
     r=searchsorted(f.ordering_l, (x,myzero(S)), by = a->a[1])
     @assert length(r)==1
 
@@ -273,11 +273,11 @@ function midpoint(i::Tuple{Int, Rational{Int}}, j::Union{Tuple{Int,Rational{Int}
     end
 end
 
-function midheights(f::DiscreteHomeo2{T,S}) where {T,S}
+function midheights(f::DiscreteHomeoAlt{T,S}) where {T,S}
     return unique([x[2] for x in f.ordering_l])
 end
 
-function splittings(c::Cand{H}, s::State) where {S,T,H<: DiscreteHomeo2{T,S}}
+function splittings(c::Cand{H}, s::State) where {S,T,H<: DiscreteHomeoAlt{T,S}}
 
     h = s.x #height inside the track
     t = s.e
@@ -333,7 +333,7 @@ function splittings(c::Cand{H}, s::State) where {S,T,H<: DiscreteHomeo2{T,S}}
 
         @assert unique([x[2] for x in ordering_r]) == sort(unique(vcat([x[2] for x in f.ordering_r], [height_mid_new])))
 
-        fnew = DiscreteHomeo2(ordering_l, ordering_r, f.roundmode)
+        fnew = DiscreteHomeoAlt(ordering_l, ordering_r, f.roundmode)
 
         @assert _is_valid(fnew)
 
@@ -663,7 +663,7 @@ function basic_homeo(J::Junction, roundmode::RoundMode)
     left = Tuple{Tuple{Int,Rational{Int}},Int}[((i,0), 0) for i in 0:J.left_len-1]
     right = Tuple{Tuple{Int,Rational{Int}},Int}[((i,0), 0) for i in 0:J.right_len-1]
 
-    return DiscreteHomeo2{Tuple{Int,Rational{Int}},Rational{Int}}(left, right, roundmode)
+    return DiscreteHomeoAlt{Tuple{Int,Rational{Int}},Rational{Int}}(left, right, roundmode)
 end
 
 
@@ -685,7 +685,7 @@ function verify_low(s::State{T}, c::Cand, n::Int) where {T}
     end
 end
 
-function assign_height_left(f::DiscreteHomeo2{T}, r::T; roundmode=:mean) where {T}
+function assign_height_left(f::DiscreteHomeoAlt{T}, r::T; roundmode=:mean) where {T}
     ind_range = searchsorted(f.ordering_l, (r,r), by = x->x[1])
     @assert length(ind_range) == 1
     ind = ind_range[1]
@@ -714,7 +714,7 @@ function assign_height_left(f::DiscreteHomeo2{T}, r::T; roundmode=:mean) where {
     @assert false
 end
 
-function assign_height_right(f::DiscreteHomeo2{T}, r::T; roundmode=:mean) where {T}
+function assign_height_right(f::DiscreteHomeoAlt{T}, r::T; roundmode=:mean) where {T}
     return assign_height_left(inv(f), r; roundmode=roundmode)
 end
 
@@ -755,7 +755,7 @@ end
 
 
 function basic_cand(bt, roundmode)
-    d=Dict{Junction, DiscreteHomeo2{Tuple{Int,Rational{Int}}, Rational{Int}}}()
+    d=Dict{Junction, DiscreteHomeoAlt{Tuple{Int,Rational{Int}}, Rational{Int}}}()
 
     for j in bt.junctions
         d[j] = basic_homeo(j, roundmode)
@@ -766,7 +766,7 @@ function basic_cand(bt, roundmode)
 
 end
 
-function heights(c::Cand{X}, fnum::Int) where {X<:DiscreteHomeo2}
+function heights(c::Cand{X}, fnum::Int) where {X<:DiscreteHomeoAlt}
     ret = Rational{Int}[]
     for k in 0:2
         i, J = c.bt.forward[(fnum, k)]
