@@ -21,3 +21,4 @@ find_pA/veering_census_with_data.txt
 cruft/
 scripts/
 CLAUDE.md
+.claude/settings.json
