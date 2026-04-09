@@ -13,7 +13,6 @@ import .Envelopes: Envelope
 #import Plots: plot
 
 
-const CLIP = 25 #don't worry about any slopes of absolute value bigger than CLIP
 
 
 
@@ -911,7 +910,8 @@ end
 #At each crevice, we try to improve there.
 #Each thread randomly chooses a crevice, and then tries to improve there.
 function try_improve!(E::Envelope{S,T,D}, candidates; targets=[], radius=0.2,kwargs...) where {S,T,D}
-	@showprogress desc="Improving envelope" @threads for target in targets
+	isempty(candidates) && return
+	@showprogress desc="Improving envelope" showspeed=true @threads for target in targets
 		for cand in population_annealing(candidates, cand->objective2(S,exact_slope(cand),target), c->jiggle(c,radius); kwargs...)
 			push!(E, (exact_slope(cand), cand))
 		end
@@ -1099,38 +1099,6 @@ end
 =#
 
 
-function inbounds(pt)
-	return all(abs.(pt) .<= CLIP)
-end
-
-function clip_pt(pt)
-    return [clamp(x, -CLIP, CLIP) for x in pt]
-end
-
-function staircase(E::Envelope{Upper})
-	pts = sort!([x[1] for x in E.A], by=x->x[1])
-	pts = unique!(clip_pt.(pts))
-	return sort(vcat(pts,[(pts[i][1], pts[i+1][2]) for i in 1:length(pts)-1]), by=x->(x[1],-x[2]))
-end
-
-function crevices(E::Envelope{Upper})
-	pts = sort!([x[1] for x in E.A], by=x->x[1])
-	pts = unique!(clip_pt.(pts))
-    return [[pts[i][1], pts[i+1][2]] for i in 1:length(pts)-1]
-end
-
-function staircase(E::Envelope{Lower})
-	pts = sort!([x[1] for x in E.A], by=x->x[1])
-	pts = unique!(clip_pt.(pts))
-	return sort(vcat(pts,[(pts[i+1][1], pts[i][2]) for i in 1:length(pts)-1]), by=x->(x[1],-x[2]))
-end
-
-function crevices(E::Envelope{Lower})
-	pts = sort!([x[1] for x in E.A], by=x->x[1])
-	pts = unique!(clip_pt.(pts))
-    return [[pts[i+1][1], pts[i][2]] for i in 1:length(pts)-1]
-end
-
 
 function normalizedchi(L::Longitude)
 	ss=slopes(L)
@@ -1148,11 +1116,146 @@ function updateith(A::Vector{T}, i::Int, val::T) where {T}
     return B
 end
 
-function constraints_multi(L::Longitude)
-    ss=slopes(L)
-    chi = Int(-sum(L.weights)//2) #Euler characteristic of the punctured surface
+# Return all Stern-Brocot approximations of x from below with denominator <= N.
+# Traverses the SB tree within [floor(x), floor(x)+1], collecting all mediants <= x.
+function lower_approximants(x::Real, N::Int)
+    result = Rational{Int}[-1//0]
+    n = Int(floor(x))
+    N >= 1 && push!(result, n // 1)
+    x == n && return sort(result)
+    # Search within (n, n+1)
+    a, b = n, 1
+    c, d = n + 1, 1
+    while true
+        p, q = a + c, b + d
+        q > N && break
+        m = p // q
+        if m <= x
+            push!(result, m)
+            a, b = p, q
+        else
+            c, d = p, q
+        end
+    end
+    return sort(result)
+end
 
-    npunctures = [gcd(a,b) for (a,b) in ss]
+# Return all Stern-Brocot approximations of x from above with denominator <= N.
+# Traverses the SB tree within [ceil(x)-1, ceil(x)], collecting all mediants >= x.
+function upper_approximants(x::Real, N::Int)
+    result = Rational{Int}[1//0]
+    n = Int(ceil(x))
+    N >= 1 && push!(result, n // 1)
+    x == n && return sort(result)
+    # Search within (n-1, n)
+    a, b = n - 1, 1
+    c, d = n, 1
+    while true
+        p, q = a + c, b + d
+        q > N && break
+        m = p // q
+        if m >= x
+            push!(result, m)
+            c, d = p, q
+        else
+            a, b = p, q
+        end
+    end
+    return sort(result)
+end
+
+function constraints_conjecture_upper(L::Longitude)
+	chi = Int(-sum(L.weights)//2)
+	ss=slopes(L)
+
+	filling_options = Iterators.product(([s, Slope([0,0])] for s in ss)...)
+	return reduce(vcat,
+	(constraints_conjecture_upper(ss, chi, collect(fillings)) for fillings in filling_options); init=[])
+end
+
+function constraints_conjecture_lower(L::Longitude)
+	chi = Int(-sum(L.weights)//2)
+	ss = [[x[1],-x[2]] for x in slopes(L)]
+
+	filling_options = Iterators.product(([s, [0,0]] for s in ss)...)
+	ret = reduce(vcat,
+	(constraints_conjecture_upper(ss, chi, collect(fillings)) for fillings in filling_options); init=[])
+	return [-r for r in ret]
+end
+
+#If lambda is a longitude and F is the boundary of a maximal foliation,
+#Our hypothesis is that F gives a quasimorphism phi with defect 1, and
+#phi(\partial \lambda) = \partial \lambda \cap \partial F <= \chi(\lambda)
+
+#Evaluating a quasimorphism on the boundary of a surface:
+#phi(\partial \Sigma) \leq 2\chi(\Sigma)D
+function constraints_conjecture_upper(ss, chi)
+	if length(ss)==0
+		return []
+	end
+	#Compute the upper and lower envelopes of all the slopes which have total intersection number less than $\chi$ with L
+
+	Eupper = Envelope{Upper, Rational{Int}, Nothing}()
+	upper_options = (_upper_helper(s, abs(chi)) for s in ss)
+	for ss_comp in Iterators.product(upper_options...)
+		@assert all(intersection_number(t,v) >= 0 for (t,v) in zip(ss, ss_comp))
+
+		#if abs(sum(intersection_number(t,v) for (t,v) in zip(ss, ss_comp))) + 
+		#	sum(gcd(t...) for (t,v) in zip(ss,ss_comp) if intersection_number(t,v)==0, init=0) <= min(-chi,0) && any(intersection_number(t,v)==0 for (t,v) in zip(ss, ss_comp))
+		if abs(sum(intersection_number(t,v) for (t,v) in zip(ss, ss_comp))) <= max(-chi, 0)
+			to_push = map(slope_to_rat, ss_comp)
+			push!(Eupper, (to_push, nothing))
+		end
+	end
+
+	#@info "obstructions" ss collect(upper_options)
+	return [x for (x,c) in Eupper.A]
+end
+
+function constraints_conjecture_upper(ss::AbstractVector, chi, fillings)
+	if any(s[1]==0 && s[2]!=0 for s in ss)
+		return []
+	else
+		unfilled_indices = [i for i in eachindex(ss,fillings) if fillings[i] == Slope([0,0])]
+		filled_indices = [i for i in eachindex(ss,fillings) if fillings[i] != Slope([0,0])]
+		ss_comps = constraints_conjecture_upper([ss[i] for i in unfilled_indices], chi + sum(gcd(ss[i]...) for i in filled_indices; init=0))
+		return [
+			[f == [0,0] ? popfirst!(ss_comp) : f[2]//f[1] for f in fillings]
+			for ss_comp in ss_comps
+		]
+	end
+end
+
+function intersection_number(v1::AbstractVector, v2::AbstractVector)
+	@assert length(v1)==length(v2)==2
+	return v1[1]*v2[2] - v1[2]*v2[1]
+end
+
+#Return the highest slope (closest to degeneracy) which has 
+#intersection number < budget with v
+#We find a linear transformation that takes us to [k,0]
+function _upper_helper(v::AbstractVector{Int}, budget)
+	@assert v[1] != 0
+	k = gcd(v[1],v[2])
+	A=n_orthogonal(v) #maps v to [k,0]
+	Ainv = inv(Rational.(A)) #convert to rational to get a rational matrix
+	#convenient, even though we already know that det(A)=1
+	p,q = A*[0,1]
+
+	#now we want the best approximations to p//q with denominator less than budget//k
+	
+	return [Ainv*[numerator(r), denominator(r)] for r in upper_approximants(p//q, ceil(Int,budget//k))] #use ceil to be conservative
+end
+
+function _lower_helper(v::AbstractVector{Int}, budget)
+	@assert v[1] == 0
+	k = gcd(v[1],v[2])
+	A=n_orthogonal(v) #maps v to [k,0]
+	Ainv = inv(Rational.(A)) #convert to rational to get a rational matrix
+	#convenient, even though we already know that det(A)=1
+	p,q = A*[0,1]
+
+	return [Ainv*[numerator(r), denominator(r)] for r in lower_approximants(p//q, ceil(Int,budget//k))]#use ceil to be conservative
 end
 
 function constraints(L::Longitude)
@@ -1449,7 +1552,10 @@ function degen_to_snappy_basis_change(bt::BoundaryTriangulation)
         m1, l1 = sum(bt.snappy_weights[e] for e in zero)
 	    m2, l2 = sum(bt.snappy_weights[e] for e in degen)
 
-        push!(ret, Int[-l1 -l2; m1 m2])
+        A = Int[-l1 -l2; m1 m2]
+        d = det(A)
+        #@info "degen_to_snappy basis change cusp $i: det=$d, matrix=$A"
+        push!(ret, A)
     end
     @assert all(abs(det(A))==1 for A in ret)
     

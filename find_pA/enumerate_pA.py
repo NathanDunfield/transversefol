@@ -66,12 +66,23 @@ def find(isosig):
 		if isosig.split("_")[0] == row[0].split("_")[0]:
 			yield row
 
-def fill_cusps(M):
+#M is a manifold, and drilled_cusps is a subset of the unfilled cusps whech
+#represent curves that have bene drilled.
+#We want to eliminate some filled cusps from the underlying ideal tetrahedron.
+#We need to return the new indices of the drilled cusps.
+#We always need at least one cusp, so  we need a special handler if we are about
+#to fill all the cusps.
+def fill_unnecessary_cusps(M, drilled_cusps):
 	is_complete = M.cusp_info('is_complete')
 	filled_cusps = [i for i in range(M.num_cusps()) if not is_complete[i]]
 	if len(filled_cusps) == M.num_cusps() and len(filled_cusps) > 0:
 		filled_cusps = filled_cusps[0:len(filled_cusps)-1]
-	return M.filled_triangulation(filled_cusps)
+
+	# Each drilled cusp is complete (is_complete=True), so never in filled_cusps.
+	# After removing filled_cusps, its new index decreases by the count of
+	# filled cusps with smaller index.
+	new_drilled_cusps = [d - sum(1 for c in filled_cusps if c < d) for d in drilled_cusps]
+	return M.filled_triangulation(filled_cusps), new_drilled_cusps
 
 def iterate_candidate_flows2(M, max_drill=2, max_segments=6, max_tets=20):
 	pq = PriorityQueue()
@@ -79,36 +90,44 @@ def iterate_candidate_flows2(M, max_drill=2, max_segments=6, max_tets=20):
 
 	#counter to disambiguate priorities
 	unique = count()
-	M.set_peripheral_curves('fillings')
+
+	M.set_peripheral_curves('fillings') #We will maintain the invariant that all filled slopes are meridional.
+
+	is_complete = M.cusp_info('is_complete')
+	filled_cusps = [i for i in range(M.num_cusps()) if not is_complete[i]]
+
 	for k in range(max_drill):
-		for to_drill in itertools.combinations(range(M.num_cusps()), k):
+		for _drilled_cusps in itertools.combinations(filled_cusps, k):
+			drilled_cusps = list(_drilled_cusps)
 			N=M.copy()
-			for cusp_ind in to_drill:
+			for cusp_ind in drilled_cusps:
 				N.dehn_fill((0,0), cusp_ind)
-			N=fill_cusps(N)
-			pq.put(((N.num_tetrahedra(), next(unique)), (N, k)))
+			N,drilled_cusps =fill_unnecessary_cusps(N, drilled_cusps)
+			pq.put(((N.num_tetrahedra(), next(unique)), (N, drilled_cusps)))
 
 	while not pq.empty():
-		priority, (M,ndrill) = pq.get()
+		priority, (M,drilled_cusps) = pq.get()
 
 		try:
 			M.volume()
 			for x in VeeringDB.siblings(M):
 				try:
 					if M.is_isometric_to(x):
-						yield M, x.name(), ndrill 
+						yield M, x.name(), drilled_cusps 
 				except RuntimeError as e:
 					pass
 					#print(e)
 		except ValueError as e:#in case M is not hyperbolic
 			print(e, file=sys.stderr)
 
-		if ndrill < max_drill:
+		if len(drilled_cusps) < max_drill:
 			for curve in M.dual_curves(max_segments=max_segments):
 				N=M.copy().drill(curve)
-				N=fill_cusps(N)
+				new_drilled_cusps = drilled_cusps + [N.num_cusps()-1]
+				N, new_drilled_cusps=fill_unnecessary_cusps(N, new_drilled_cusps)
+				#the newly drilled cusps has the last available index.
 				if N.num_tetrahedra() < max_tets:
-					pq.put(((N.num_tetrahedra(), next(unique)),(N, ndrill+1)))
+					pq.put(((N.num_tetrahedra(), next(unique)),(N, new_drilled_cusps)))
 
 
 """
@@ -129,7 +148,7 @@ def iterate_candidate_flows(M, count=10, max_drill=2, maxlength=3):
 					N=M.drill_words([i[0] for i in words], bits_prec=200)
 					for x in VeeringDB.siblings(N):
 						if N.is_isometric_to(x):
-							yield N, x.name(), len(words)
+							yield N, x.name(), list(range(M.num_cusps(), N.num_cusps()))
 				except snappy.geometric_structure.geodesic.check_away_from_core_curve.ObjectCloseToCoreCurve as e:
 					pass
 					#print(e)
@@ -138,6 +157,7 @@ def iterate_candidate_flows(M, count=10, max_drill=2, maxlength=3):
 					#print(e)
 				except RuntimeError as e:
 					print(e, file=sys.stderr)
+
 
 
 L=[
@@ -161,7 +181,7 @@ L=[
 "o9_36699(7,1)"]
 
 
-def pA_flows(MM, count=10, max_drill=2, maxlength=3, max_segments=6, max_tets=20, method='geodesic'):
+def pA_flows(MM, count=10, max_drill=2, maxlength=3, max_segments=6, max_tets=20, method='geodesic', return_isom=False, return_prong_counts=False):
 	D=dict()
 	seen=set()
 
@@ -171,7 +191,7 @@ def pA_flows(MM, count=10, max_drill=2, maxlength=3, max_segments=6, max_tets=20
 		it = iterate_candidate_flows2(MM, max_drill=max_drill, max_segments = max_segments, max_tets = max_tets)
 
 
-	for N,isosig,n in it:
+	for N,isosig,drilled_cusps in it:
 		tri, angle = veering.taut.isosig_to_tri_angle(isosig)
 		assert tri.isOriented() #important to do it this way, because veering fixes the orientation, and then we can pass to snappy without any problems
 		M=snappy.Manifold(tri)
@@ -183,11 +203,11 @@ def pA_flows(MM, count=10, max_drill=2, maxlength=3, max_segments=6, max_tets=20
 		assert len(isoms) >= 1
 		for isom in isoms:
 
-			#compute the filling slopes
-			filling_slopes = [(0,0) for i in range(n)]
-			for i in range(n):
+			#Transform the filling slopes on N to filling slopes on M
+			filling_slopes = [(0,0) for i in range(N.num_cusps())]
+			for i in drilled_cusps:
 				filling_slopes[isom.cusp_images()[i]] = isom.cusp_maps()[i]*sage.all.vector([1,0])
-			for i in range(n):
+			for i in range(len(filling_slopes)):
 				if filling_slopes[i][0] < 0:
 					filling_slopes[i] = (-filling_slopes[i][0], -filling_slopes[i][1])
 
@@ -208,8 +228,33 @@ def pA_flows(MM, count=10, max_drill=2, maxlength=3, max_segments=6, max_tets=20
 
 			prong_counts = [abs(prepare.intersection_number(a,b)) for a,b in zip(filling_slopes, degeneracy)]
 
-			if all(x >= 2 for x in prong_counts):
-				yield s
+			if all(pc >= 2 for pc, s in zip(prong_counts,filling_slopes) if s != (0,0)):
+				if return_isom or return_prong_counts:
+					extras = {}
+					if return_prong_counts:
+						extras["prong_counts"] = [int(pc) for pc in prong_counts]
+					if return_isom:
+						# The cusps of N that are not drilled correspond 1-to-1 with MM's cusps.
+						# Use isom (N→M) to build the M→MM cusp mapping:
+						# for each cusp j of M, find its preimage i in N; if i is an original
+						# (non-drilled) cusp, it maps to cusp i of MM with map isom.cusp_maps()[i].inverse().
+						drilled_set = set(drilled_cusps)
+						NtoM_imgs = list(isom.cusp_images())
+						MtoN = {NtoM_imgs[i]: i for i in range(N.num_cusps())}
+						cusp_images_MtoMM = []
+						cusp_maps_MtoMM   = []
+						for j in range(M.num_cusps()):
+							i = MtoN[j]
+							if i not in drilled_set:
+								cusp_images_MtoMM.append(i)
+								cusp_maps_MtoMM.append(isom.cusp_maps()[i].inverse())
+							else:
+								cusp_images_MtoMM.append(None)
+								cusp_maps_MtoMM.append(None)
+						extras["isom"] = (cusp_images_MtoMM, cusp_maps_MtoMM)
+					yield s, extras
+				else:
+					yield s
 
 
 
@@ -235,32 +280,3 @@ with open("batch/" + str(name) + "_pAflows.txt","w") as f:
 
 #print(df)
 
-if __name__ == "__main__":
-	"""
-	print(sys.argv)
-	start=ast.literal_eval(sys.argv[1])
-	finish=ast.literal_eval(sys.argv[2])
-	for M in snappy.OrientableClosedCensus[start:finish]:
-		fname = "hodgson_weeks_pA/" + str(M) + "_pAflows.txt"
-		if pathlib.Path(fname).is_file():
-			with open(fname, "r") as f:
-				if len(f.readlines()) > 0:
-					continue
-		try:
-			with open(fname,"w") as f:
-				for isosig in pA_flows(M, count=6, max_drill=3, max_segments=6, maxlength=3, max_tets=20, method='combinatorial'):
-					print(isosig, file=f)
-					break
-		except Exception as e:
-			print(e)
-	"""
-
-	"""	
-	for name in L:
-		print(name)
-		fname = "dunfield_list/" + name + "_pAflows.txt"
-		M=snappy.Manifold(name)
-		with open(fname,"w") as f:
-			for isosig in pA_flows(M, count=6, max_drill=4, max_segments=6, maxlength=3, max_tets=20, method='combinatorial'):
-				print(isosig, file=f)
-	"""

@@ -30,7 +30,7 @@ function find_s2_longitudes(tup)
     return collect(D)
 end
 
-function compute_longitudes!(tup; max_weight=50)
+function compute_longitudes!(tup; max_weight=100)
 	Elong, longitudes = compute_longitudes(tup.bt, tup.prep.fans, tup.prep.top_bot_pairs, tup.prep.tet_faces, tup.prep.face_coorientations; max_weight=max_weight)
 
     for (_, cand) in Elong.A
@@ -41,7 +41,7 @@ function compute_longitudes!(tup; max_weight=50)
 end
 
 
-function compute_longitudes(bt, fans, top_bot_pairs, tet_faces, face_coorientations; max_weight=20)
+function compute_longitudes(bt, fans, top_bot_pairs, tet_faces, face_coorientations; max_weight=100)
     Elong = PEnvelope()
 	long_dict = DefaultDict(()->[])
 	longitudes = []
@@ -356,20 +356,31 @@ const TRY = (
             radius=0.1
         )
 const TRYHARD = (
-            pool_size=5,
-            n_walks=10, 
-            iters=200000, 
+            pool_size=3,
+            n_walks=6, 
+            iters=300000, 
             betastart=400, 
             betafinish=20000, 
             radius=0.1
         )
 
+const TRYHARDEST = (
+    pool_size=6,
+    n_walks=18, 
+    iters=1000000, 
+    betastart=400, 
+    betafinish=20000, 
+    radius=0.1
+)
 
-function runjob(isosig::String; target=:crevices, refresh=false, showplots=true, candidates=[:longitudes], thickness=24, max_targets=100, optimization_args...)
-	tup = load(isosig, refresh=refresh)
+function runjob(isosig::String; refresh=false, kwargs...)
+    runjob(load(isosig, refresh=refresh); kwargs...)
+end
+
+function runjob(tup::NamedTuple; target=:crevices, refresh=false, showplots=true, candidates=[:longitudes], thickness=24, max_targets=100, optimization_args...)
 
     @info "running $(tup.isosig)" target
-    index = VeeringCensus.index(isosig)
+    index = VeeringCensus.index(tup.isosig)
 
 	ncusps = tup.bt.ncusps
 	Eupper = tup.Eupper
@@ -392,7 +403,7 @@ function runjob(isosig::String; target=:crevices, refresh=false, showplots=true,
             push!(lower_cands, set_roundmode(c,UP))
         end
     end       
-    if :random in candidates
+    if :random in candidates || length(upper_cands) < 10 || length(lower_cands) < 10
         for _ in 1:1000
             push!(upper_cands, random_cand(tup.bt,thickness,DOWN))
             push!(lower_cands, random_cand(tup.bt,thickness, UP))
@@ -400,8 +411,8 @@ function runjob(isosig::String; target=:crevices, refresh=false, showplots=true,
     end
 
     if target == :crevices
-        upper_targets = crevices_general(Eupper,CLIP)
-        lower_targets = crevices_general(Elower,CLIP)
+        upper_targets = crevices_general(Eupper,25)
+        lower_targets = crevices_general(Elower,25)
     else
         upper_targets = [target]
         lower_targets = [target]
@@ -419,14 +430,17 @@ function runjob(isosig::String; target=:crevices, refresh=false, showplots=true,
     try_improve!(Elower, lower_cands; targets=lower_targets, optimization_args...)
     save((tup..., Eupper=Eupper, Elower=Elower))
 
-	p=quickview((tup..., Eupper=Eupper, Elower=Elower), targets=vcat(upper_targets, lower_targets))
-	if isinteractive() && showplots
-		display(p)
+    if showplots
+	    p=quickview((tup..., Eupper=Eupper, Elower=Elower), targets=vcat(upper_targets, lower_targets))
+        PlotlyJS.savefig(p, joinpath(BATCH_DIR, "$(tup.isosig).html"))
+        PlotlyJS.savefig(p, joinpath(BATCH_DIR, "$(index).html"))
+        if isinteractive()
+            display(p)
+        end
 	end
-    PlotlyJS.savefig(p, joinpath(BATCH_DIR, "$(isosig).html"))
-    PlotlyJS.savefig(p, joinpath(BATCH_DIR, "$(index).html"))
     #save((tup..., Eupper=Eupper, Elower=Elower))
 	flush(stdout)
+    return (tup..., Eupper=Eupper, Elower=Elower)
 end
 
 function bench(c::Cand)
@@ -575,12 +589,22 @@ function slope_to_rat(x::AbstractVector{T}) where {T<:Real}
     return x[2]/x[1]
 end
 
+function slope_to_rat(x::Tuple{T,T}) where {T<:Union{Int, Rational}}
+    return x[2]//x[1]
+end
+
+function slope_to_rat(x::Tuple{T,T}) where {T<:Real}
+    return x[2]/x[1]
+end
+
 function slope_to_twist(x::AbstractVector{T}) where {T<:Union{Int, Rational}}
     return x[1]//x[2]
 end
 function slope_to_twist(x::AbstractVector{T}) where {T<:Real}
     return x[1]/x[2]
 end
+
+
 
 function flagbad(range)
     include("batch/2cusp_manifest.txt")
@@ -638,12 +662,12 @@ end
 
 
 function run_profile()
-    runjob(1,2, reg=true, rt=0, nlongs=2, refresh=true)
+    runjob(1,2; TRY...,refresh=true)
     Profile.Allocs.clear()
     Profile.init(n = 10^7, delay = 0.01)
     #Profile.Allocs.@profile sample_rate=0.0001 runjob(1, 2, reg=true, rt=0, nlongs=15, refresh=true)
     #PProf.Allocs.pprof()
-    @profile runjob(1,2, reg=true, rt=0, nlongs=20, refresh=true)
+    @profile runjob(1,2, TRY..., refresh=true)
 end
 
 function aggregate_bounds(X)

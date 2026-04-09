@@ -393,11 +393,15 @@ function find_longitudes_hom2(fans, top_bot_pairs, tet_faces, face_coorientation
         # Find t ∈ ℤ^ntet minimising sum(x) subject to x = h + D*t ≥ 0
         model = Model(HiGHS.Optimizer)
         set_silent(model)
+        set_optimizer_attribute(model, "threads", 1)
         @variable(model, t[1:ntet], Int)
+        @variable(model, z, Int)
         x_expr = D * t .+ h
-        @constraint(model, x_expr .>= 0)
-        @constraint(model, sum(x_expr) >= 1)
-        @objective(model, Min, sum(x_expr))
+        #@constraint(model, x_expr .>= 0)
+        #@constraint(model, sum(x_expr) >= 1)
+        @constraint(model, z >= 0)
+        @constraint(model, x_expr .>= z)
+        @objective(model, Max, z)
         optimize!(model)
 
         @assert is_solved_and_feasible(model) "LP should always be feasible: every H₂ class in the positive cone has a non-negative representative"

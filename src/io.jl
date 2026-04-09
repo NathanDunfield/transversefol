@@ -1,6 +1,6 @@
 using Serialization
 
-const BATCH_DIR = joinpath(@__DIR__, "..", "batch")
+const BATCH_DIR = "/home/jonathan/batch" #joinpath(@__DIR__, "..", "batch")
 const CLUSTER_BATCH_DIR = "/home/jonathan/engaging_sshfs/transversefol/batch"
 
 function _load_prep(isosig::String)
@@ -76,7 +76,7 @@ function savestat(d::Dict)
     end
 end
 
-function load(isosig::String; refresh=false, max_weight=100)
+function load(isosig::String; refresh=false, refresh_longs=false, max_weight=100)
     prep = _load_prep(isosig)
     path = latest_save("$(isosig).jls")
 
@@ -102,6 +102,11 @@ function load(isosig::String; refresh=false, max_weight=100)
         save(tup)
 	else
         tup = (deserialize(path)..., isosig=isosig)
+        if refresh_longs
+        	Elong, longitudes = compute_longitudes(tup.bt, tup.prep.fans, tup.prep.top_bot_pairs, tup.prep.tet_faces, tup.prep.face_coorientations; max_weight=max_weight)
+            tup = (tup..., Elong=Elong, longitudes=longitudes)
+            save(tup)
+        end
 	end
 	return tup
 end

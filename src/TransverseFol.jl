@@ -26,7 +26,9 @@ using StaticArrays
 using Subscripts
 using WebIO
 
-export runjob, quickview, quickview_snappy
+export runjob, quickview, multiview
+export PAFlow, parse_pA_flow_json
+export TRY, TRYHARD, TRYHARDEST
 
 # Sub-modules
 include("Envelopes.jl")
@@ -45,7 +47,6 @@ include("search.jl")
 include("find_surface.jl")
 include("plotting.jl")
 include("draw_bt.jl")
-include("view.jl")
 include("io.jl")
 include("main.jl")
 

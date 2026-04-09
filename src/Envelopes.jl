@@ -2,8 +2,8 @@ module Envelopes
 using Base.Threads
 using StaticArrays
 using ProgressMeter
-export Upper, Lower, Eq, Envelope, crevices_general, basis_change
-import Base: inv, getindex, setindex!, hash, push!, length, copy, show, rand
+export Upper, Lower, Eq, Envelope, crevices_general, basis_change, BasisChange
+import Base: inv, getindex, setindex!, hash, push!, length, copy, show, rand, clamp, *
 
 abstract type Comp
 end
@@ -16,8 +16,6 @@ end
 
 struct Eq <: Comp
 end
-
-
 
 struct Envelope{S,T,D} #keep track of local maxes
     A::Vector{Tuple{Vector{T},D}}
@@ -100,7 +98,7 @@ function contains(c::Crevice{N}, p::SVector{N,T}) where {N,T}
 end
 
 function is_valid_crevice(c::Crevice{N}) where {N}
-    return all( (i==j || c.faces[i][i] < c.faces[j][i]+0.000001)
+    return all( (i==j || c.faces[i][i] <= c.faces[j][i])
                for i in 1:N, j in 1:N
               )
 end
@@ -125,16 +123,19 @@ function push!(c::Crevice{N}, pt::SVector{N,T}) where {N,T}
     end 
 end
 
-function leaves(c::Crevice{N}) where {N}
+function accumulate_leaves!(c::Crevice{N},accum::Vector{SVector{N}}) where {N}
     if c.pivot == nothing
-        return [SVector{N}([c.faces[i][i] for i in 1:N])]
+        push!(accum, SVector{N}([c.faces[i][i] for i in 1:N]))
     else
-        return Iterators.flatten(map(leaves, c.children))
+        for child in c.children
+            accumulate_leaves!(child, accum)
+        end
     end
+    return accum
 end
 
 function all_leaves(c::Crevice{N}) where {N}
-    return unique(collect(leaves(c)))
+    return unique(accumulate_leaves!(c,SVector{N}[]))
 end
 
 function crevices_general(e::Envelope{Upper,T}, clip) where {T}
@@ -228,25 +229,49 @@ end
 
 =#
 
+# Möbius transform f(x) = (c+dx)/(a+bx) for matrix [a b; c d] with det=1.
+# above_pole: true  (x ≥ pole, lo=pole) → pole maps to -∞
+#             false (x ≤ pole, hi=pole) → pole maps to +∞
+# For ±∞ input: affine (b=0) preserves ±∞, depending on det(M); Möbius maps both to the finite d/b.
+function mobius(M::AbstractMatrix, above_pole::Union{Bool,Nothing}, x::T) where {T<:Rational}
+    a, b, c, d = M[1,1], M[1,2], M[2,1], M[2,2]
+    detM = (a*d - b*c)
+
+    if isinf(x)
+        return b == 0 ? detM * x : T(d, b)
+    end
+
+    denom = a + b * x
+
+    if iszero(denom)
+        @assert above_pole != nothing
+        #If detM = 1, then above_pole -> -infty
+        return above_pole ? T(-detM, 0) : T(detM, 0)
+    end
+    return (c + d * x) // denom
+end
+
 # Apply a per-coordinate change of basis to the region (Elower, Eupper).
 # transforms[i] = [a b; c d] with det=1; acts on slope x as f_i(x) = (c + d*x)/(a + b*x).
-# The pole of f_i is -a/b (absent when b=0). Splits into up to 2^n pieces, one per sign
-# pattern of each coordinate relative to its pole. Empty pieces are dropped.
+# The pole of f_i is -a/b (absent when b=0). Splits into up to 2^n pieces per sign pattern
+# of each coordinate relative to its pole. Each quadrant is first restricted via clamp, then
+# the Möbius transform is applied coordinate-wise.
 function basis_change(Elower::Envelope{Lower,T,D}, Eupper::Envelope{Upper,T,D},
                       transforms::Vector{M}) where {T<:Rational, D, M<:AbstractMatrix}
     n = length(transforms)
 
-    # Pole for each coordinate: Rational{Int} or nothing (b==0, affine, no split)
+    determinants = []
+    for i in 1:n
+        a, b, c, d = transforms[i][1,1], transforms[i][1,2], transforms[i][2,1], transforms[i][2,2]
+        @assert abs(a*d - b*c) == 1 "transform $i has determinant $(a*d - b*c), expected +-1"
+        push!(determinants, a*d-b*c)
+    end
+    determinants = unique!(determinants)
+    @assert length(unique(determinants))==1 "Can't deal with mixed determinants"
+    detM = determinants[1]
+
     poles = [transforms[i][1,2] == 0 ? nothing : -transforms[i][1,1]//transforms[i][1,2]
              for i in 1:n]
-
-    # Möbius transformation for coordinate i
-    f(i, x) = let a=transforms[i][1,1], b=transforms[i][1,2],
-                  c=transforms[i][2,1], d=transforms[i][2,2]
-        (c + d*x) / (a + b*x)
-    end
-
-    transform_s(s) = T[f(i, s[i]) for i in 1:n]
 
     # Choices per coordinate: nothing means no split, true/false = above/below pole
     choices = [poles[i] === nothing ? [nothing] : [true, false] for i in 1:n]
@@ -254,48 +279,43 @@ function basis_change(Elower::Envelope{Lower,T,D}, Eupper::Envelope{Upper,T,D},
     result = Tuple{Envelope{Lower,T,D}, Envelope{Upper,T,D}}[]
 
     for pattern in Iterators.product(choices...)
-        filter_fn(s) = all(
-            poles[i] === nothing ||
-            (pattern[i] ? s[i] > poles[i] : s[i] < poles[i])
-            for i in 1:n)
+        # Pre-image box for this quadrant in original coordinates.
+        # Above-pole (true): [pole, +∞);  below-pole (false): (-∞, pole].
+        lo = T[poles[i] === nothing ? T(-1,0) : (pattern[i] ? poles[i] : T(-1,0)) for i in 1:n]
+        hi = T[poles[i] === nothing ? T(1,0)  : (pattern[i] ? T(1,0)  : poles[i]) for i in 1:n]
 
-        lower_pts = [(transform_s(s), c) for (s, c) in Elower.A if filter_fn(s)]
-        upper_pts = [(transform_s(s), c) for (s, c) in Eupper.A if filter_fn(s)]
+        Elower_q, Eupper_q = clamp(Elower, Eupper, lo, hi)
+        isempty(Elower_q.A) && isempty(Eupper_q.A) && continue
 
-        if isempty(lower_pts) && isempty(upper_pts)
-            continue
+        transform_pt(s) = T[mobius(transforms[i], pattern[i], s[i]) for i in 1:n]
+
+        lower_pts = [(transform_pt(s), c) for (s, c) in Elower_q.A]
+        upper_pts = [(transform_pt(s), c) for (s, c) in Eupper_q.A]
+
+        if detM==1
+            push!(result, (Envelope{Lower}(lower_pts), Envelope{Upper}(upper_pts)))
+        else
+            push!(result, (Envelope{Lower}(upper_pts), Envelope{Upper}(lower_pts)))
         end
-
-        # When one side is empty, synthesize a boundary point from the pole images.
-        # For coord i with a pole and pattern[i]=true:  f maps (pole,+∞) → (-∞, d/b),
-        #   so the lower boundary is -∞ and the upper boundary is d/b.
-        # For coord i with a pole and pattern[i]=false: f maps (-∞,pole) → (d/b,+∞),
-        #   so the lower boundary is d/b and the upper boundary is +∞.
-        # For affine coords (no pole): lower boundary is -∞, upper is +∞.
-        if isempty(lower_pts)
-            bound = T[if poles[i] === nothing
-                          T(-1, 0)
-                      elseif pattern[i]
-                          T(-1, 0)
-                      else
-                          transforms[i][2,2] // transforms[i][1,2]
-                      end for i in 1:n]
-            lower_pts = [(bound, upper_pts[1][2])]
-        elseif isempty(upper_pts)
-            bound = T[if poles[i] === nothing
-                          T(1, 0)
-                      elseif pattern[i]
-                          transforms[i][2,2] // transforms[i][1,2]
-                      else
-                          T(1, 0)
-                      end for i in 1:n]
-            upper_pts = [(bound, lower_pts[1][2])]
-        end
-
-        push!(result, (Envelope{Lower}(lower_pts), Envelope{Upper}(upper_pts)))
     end
 
     return result
+end
+
+# Restrict the region between two envelopes to the box [lo[i], hi[i]] for each coordinate.
+# Each point is clamped to the box; push! recomputes the Pareto front.
+function clamp(Elower::Envelope{Lower,T,D}, Eupper::Envelope{Upper,T,D},
+               lo::Vector{T}, hi::Vector{T}) where {T, D}
+    clamp_pt(p) = T[clamp(p[i], lo[i], hi[i]) for i in 1:length(p)]
+    Elower_r = Envelope{Lower,T,D}()
+    Eupper_r = Envelope{Upper,T,D}()
+    for (p, c) in Elower.A
+        push!(Elower_r, (clamp_pt(p), c))
+    end
+    for (p, c) in Eupper.A
+        push!(Eupper_r, (clamp_pt(p), c))
+    end
+    return Elower_r, Eupper_r
 end
 
 function slice(v::Vector{T}, fillings::Vector{Tuple{Int,Int}}) where {T<:Real}
@@ -304,13 +324,108 @@ end
 
 #return a slice of an envelope with given filling slopes
 function slice(E::Envelope{S,T,D}, fillings::Vector{Tuple{Int,Int}}) where {S, T<:Real, D}
+    #@show fillings
     Eslice = Envelope{S,T,D}()
     for (s, c) in E.A
-        if all(fillings[i] == (0,0) || strict_comp(S, fillings[i][2]//fillings[i][1],s[i]) for i in 1:length(fillings))
+        if all(fillings[i] == (0,0) || strict_comp(S, fillings[i][2]//fillings[i][1], s[i]) for i in 1:length(fillings))
             push!(Eslice, (slice(s, fillings),c))
         end
     end
     return Eslice
 end
+
+
+#Given a lower and an upper 2D envelope, return a collection of rectangles which
+#cover the region between them.
+function rectangles(Elower::Envelope{Lower}, Eupper::Envelope{Upper})
+    
+    #sweep from left to right
+    lower_pts = sort([x for (x,c) in Elower.A], by=(x -> x[1]))
+    upper_pts = sort([x for (x,c) in Eupper.A], by=(x -> x[1]))
+    
+    ret = []
+    lower_pt_queue = []
+
+    while true
+        if !isempty(upper_pts) && (isempty(lower_pts) || lower_pts[1][1] >= upper_pts[1][1])
+            up = popfirst!(upper_pts)
+
+            floor = isempty(lower_pt_queue) ? 1//0 : lower_pt_queue[end][2]
+
+
+            #finish rectangles, if valid. All these points surely have lesser x coordinate
+            #We need to check whether they have lesser y coordinate
+            #Also we need to ensure the rectangles do not overlap.
+            ceil = up[2]
+            for lp in lower_pt_queue # should be sorted by x
+                if all(lp .< [up[1], ceil])
+                    push!(ret, (lp, [up[1], ceil]))
+                    ceil = lp[2]
+                end
+            end
+
+            lower_pt_queue = [[up[1], floor]]
+        elseif !isempty(lower_pts)
+            push!(lower_pt_queue, popfirst!(lower_pts))
+        else
+            break
+        end
+    end
+    return ret
+end
+
+#Given a lower and an upper envelope, return a collection of disjoint cuboids which
+#cover the region between them. Uses random pivot splits and recursion.
+function cuboids(Elower::Envelope{Lower}, Eupper::Envelope{Upper})
+    lower_pts = [x for (x,_) in Elower.A]
+    upper_pts = [x for (x,_) in Eupper.A]
+
+    # Prune: remove upper points that don't dominate any lower point, and vice versa
+    filter!(u -> any(all(l .< u) for l in lower_pts), upper_pts)
+    filter!(l -> any(all(l .< u) for u in upper_pts), lower_pts)
+
+    isempty(lower_pts) && return Tuple{Vector,Vector}[]
+    isempty(upper_pts) && return Tuple{Vector,Vector}[]
+
+    if length(lower_pts) == 1 && length(upper_pts) == 1
+        l, u = lower_pts[1], upper_pts[1]
+        return all(l .< u) ? [(l, u)] : Tuple{Vector,Vector}[]
+    end
+
+    all_pts = vcat(lower_pts, upper_pts)
+    pivot = rand(all_pts)
+    d = length(pivot)
+    k = rand(1:d)
+    c = pivot[k]
+
+    T = eltype(eltype(lower_pts))
+
+    # Below: x_k ≤ c. Clamp upper, keep lower.
+    Eupper_lo = Envelope{Upper,T,Nothing}()
+    for u in upper_pts
+        u_ = copy(u); u_[k] = min(u[k], c)
+        push!(Eupper_lo, (u_, nothing))
+    end
+    Elower_lo = Envelope{Lower,T,Nothing}()
+    for l in lower_pts
+        push!(Elower_lo, (l, nothing))
+    end
+
+    # Above: x_k ≥ c. Clamp lower, keep upper.
+    Elower_hi = Envelope{Lower,T,Nothing}()
+    for l in lower_pts
+        l_ = copy(l); l_[k] = max(l[k], c)
+        push!(Elower_hi, (l_, nothing))
+    end
+    Eupper_hi = Envelope{Upper,T,Nothing}()
+    for u in upper_pts
+        push!(Eupper_hi, (u, nothing))
+    end
+
+    return vcat(cuboids(Elower_lo, Eupper_lo), cuboids(Elower_hi, Eupper_hi))
+end
+
+
+include("BasisChange.jl")
 
 end

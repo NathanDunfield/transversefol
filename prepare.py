@@ -338,7 +338,7 @@ def compute_prep(isosig, longitude=None, draw_bt=False):
 
 
 	# For each tetrahedron: list of (triangle_index, orientation_sign) for its 4 faces.
-	# orientation_sign is ±1 in the Regina/SnaPPy convention (NOT the veering convention).
+	# orientation_sign is ±1 in the Regina/SnapPy convention (NOT the veering convention).
 	# To get the boundary operator in the veering co-orientation convention, multiply
 	# each sign by face_coorientations[triangle_index].
 	tet_faces = [
