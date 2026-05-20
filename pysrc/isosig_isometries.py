@@ -30,11 +30,11 @@ import json
 import argparse
 import random
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, _HERE)
-sys.path.insert(0, os.path.join(_HERE, "find_pA"))
-sys.path.insert(0, "/home/jonathan/Dropbox/repo/Veering/scripts")
-sys.path.insert(0, "/home/jonathan/Dropbox/repo/Veering")
+#_HERE = os.path.dirname(os.path.abspath(__file__))
+#sys.path.insert(0, _HERE)
+#sys.path.insert(0, os.path.join(_HERE, "find_pA"))
+#sys.path.insert(0, "/home/jonathan/Dropbox/repo/Veering/scripts")
+#sys.path.insert(0, "/home/jonathan/Dropbox/repo/Veering")
 
 import snappy
 import veering.taut

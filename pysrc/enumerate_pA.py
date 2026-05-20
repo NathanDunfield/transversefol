@@ -26,12 +26,14 @@ def basic_hash(manifold, digits=6):
 def to_str_at_prec(x, d):
 	return ('%.' + repr(d) + 'f') % x
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
 def generate_census():
-	subprocess.run(["rm", "veering_census.sq3"]) 
-	conn = sqlite3.connect("veering_census.sq3")
+	subprocess.run(["rm", os.path.join(_HERE, "veering_census.sq3")])
+	conn = sqlite3.connect(os.path.join(_HERE, "veering_census.sq3"))
 
 	cur = conn.cursor()
-	reader = csv.reader(open("veering_census_with_data.txt"), delimiter=" ")
+	reader = csv.reader(open(os.path.join(_HERE, "veering_census_with_data.txt")), delimiter=" ")
 	data = []
 	for i, row in enumerate(reader):
 		isosig = row[0].split("_")[0]
@@ -52,11 +54,11 @@ def generate_census():
 #generate_census()
 
 
-_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "find_pA", "veering_census.sq3")
+_DB_PATH = os.path.join(_HERE, "veering_census.sq3")
 VeeringDB=snappy.database.ManifoldTable(table='census', mfld_hash=basic_hash, db_path=_DB_PATH)
 
 def find(isosig):
-	reader = csv.reader(open("veering_census_with_data.txt"), delimiter=" ")
+	reader = csv.reader(open(os.path.join(_HERE, "veering_census_with_data.txt")), delimiter=" ")
 	for row in reader:
 		if isosig.split("_")[0] == row[0].split("_")[0]:
 			yield row

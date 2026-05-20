@@ -1,6 +1,5 @@
 using Serialization
 
-const BATCH_DIR = "/home/jonathan/batch" #joinpath(@__DIR__, "..", "batch")
 const CLUSTER_BATCH_DIR = "/home/jonathan/engaging_sshfs/transversefol/batch"
 const PYTHON_PATH = ENV["TRANSVERSEFOL_PYTHON"]
 const BATCH_DIR = ENV["TRANSVERSEFOL_CACHE_DIR"]

@@ -935,7 +935,7 @@ function population_annealing(initial_cands, objective, jiggle; iters=50000, poo
 	    end
 
 		accept_frac = accept_count/(accept_count+reject_count)
-		@info "walk stats" oldval bestval accept_frac
+		#@info "walk stats" oldval bestval accept_frac
 	    end
     return [x[2] for x in pool]
 end

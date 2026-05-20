@@ -815,7 +815,7 @@ coordinate system.
 function multiview(isosigs_with_fillings::Vector{String}; MM=isosigs_with_fillings[1], kwargs...)
     @assert all(contains(s, "_[") for s in isosigs_with_fillings)
 
-    python = "/home/jonathan/miniconda3/envs/sage/bin/python3"
+    python = PYTHON_PATH
     script = joinpath(@__DIR__, "..", "pysrc", "isosig_isometries.py")
     lines  = readlines(`$python $script $MM $isosigs_with_fillings`)
     pa_flows = parse_pA_flow_json.(lines)

@@ -28,15 +28,15 @@ julia> using TransverseFol
 julia> phi = TransverseFol.load("eLMkbcddddedde_2100")
 ```
 
-Search for pseudo-Anosov flows given a manifold name. Works with cusped manifolds as well. `scripts` is a top level directory in the repo.
-```
-python3 scripts/find_pA_flows.py "m304(4,-1)"
-```
-
 Find foliations transverse to phi. Results will be cached in `TRANSVERSEFOL_CACHE_DIR`. If you didn't find enough foliations, you can try to run it again, or replace `TRY` with `TRYHARD`
 ```
 julia> runjob(phi; TRY...) 
 julia> quickview(phi)
+```
+
+Search for pseudo-Anosov flows given a manifold name. Works with cusped manifolds as well. `scripts` is a top level directory in the repo.
+```
+python3 scripts/find_pA_flows.py "m304(4,-1)"
 ```
 
 Search for foliations on a closed 3-manifold by searching for pseudo-Anosov flows, and then searching for transverse foliations
